@@ -56,6 +56,16 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const totalActions = actions.length;
   const target = Math.min(indexRaw, totalActions);
 
+  // Information-set viewer: the seat the human (or recorder) actually
+  // saw the game from. We label actions and (in future) redact other
+  // fields from this seat's perspective so analysis at past steps
+  // doesn't reveal info the player didn't have then.
+  const viewer: PlayerIndex | undefined =
+    row.recorderSeat != null ? (row.recorderSeat as PlayerIndex)
+    : row.bot0Strategy != null && row.bot1Strategy == null ? 1
+    : row.bot1Strategy != null && row.bot0Strategy == null ? 0
+    : undefined;
+
   const game = new Game({
     includeExpansion: row.includeExpansion,
     includeMain2: row.includeMain2,
@@ -80,7 +90,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const a = actions[i];
     const last = i === target - 1;
     if (last) {
-      lastLabel = labelAction(game, a);
+      lastLabel = labelAction(game, a, viewer);
       actor = game.decider();
     }
     const preLogLen = game.state.log.length;

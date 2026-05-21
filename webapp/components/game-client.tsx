@@ -307,12 +307,21 @@ export function GameClient({ gameId, initialView, initialTotalActions }: Props) 
   // keep showing the live view so the layout doesn't blink.
   const view: GameView = inAnalysis && analysisSnap ? analysisSnap.view : liveView;
 
-  // In record mode the recorder's seat is fixed regardless of whose turn it
-  // is; the same recorder enters both seats' actions. In play mode, the
-  // engine auto-advances bot turns so the decider is always the human.
+  // Lock `me` to the seat the local user is actually sitting in:
+  //   - record mode: recorderSeat
+  //   - play mode: the human seat (the one without a bot)
+  //   - fallback: the current decider
+  // Previously `me = view.decider` worked because in live play the human
+  // is always the decider (server auto-advances bots). In analysis mode
+  // we may replay to mid-bot-chain states where the bot is the decider —
+  // without this lock, the UI would flip perspective and show the bot's
+  // hand. Locking to seat identity preserves the player's POV at every
+  // step.
   const mode = view.config.mode ?? "play";
   const me: 0 | 1 = mode === "record" && view.config.recorderSeat != null
     ? (view.config.recorderSeat as 0 | 1)
+    : view.config.human[0] ? 0
+    : view.config.human[1] ? 1
     : view.decider;
   const oppSeat: 0 | 1 = me === 0 ? 1 : 0;
   const activeDecider = view.decider;
