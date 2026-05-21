@@ -89,7 +89,7 @@ function viewCard(c: CardInst): CardView {
   };
 }
 
-function labelAction(game: Game, a: Action): string {
+export function labelAction(game: Game, a: Action): string {
   const st = game.state;
   if (a.type === "DRAFT_PROTOCOL") return `Draft ${a.protocol}`;
   if (a.type === "PLAY_FACE_UP") {
