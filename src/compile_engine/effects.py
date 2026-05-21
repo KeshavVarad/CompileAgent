@@ -483,10 +483,34 @@ def _enumerate_all(
     return out
 
 
-def _describe_card(state: GameState, line_idx: int, player: int, c: CardInst) -> str:
+def _describe_card(
+    state: GameState,
+    line_idx: int,
+    player: int,
+    c: CardInst,
+    viewer: int | None = None,
+) -> str:
+    """Render a (line, player, card) tuple as a Choice-prompt label.
+
+    Face-down cards are private information per Codex p.5 — the viewer
+    only knows their own face-downs. Opponent face-downs are redacted
+    to "face-down (2)"; the underlying target object still carries the
+    real card so the engine resolves correctly. Pass `viewer=None` to
+    keep the old reveal-everything behaviour (used by non-UI code
+    paths like logging and replay diffing).
+    """
     d = state.defs[c.def_id]
-    face = "up" if c.face_up else "dn"
-    return f"L{line_idx}/P{player}: {d.protocol} {d.value} ({face})"
+    owned_by_viewer = viewer is not None and player == viewer
+    knows_identity = c.face_up or owned_by_viewer or viewer is None
+    side = (
+        f"P{player + 1}" if viewer is None
+        else ("your" if owned_by_viewer else "opp")
+    )
+    lane = f"L{line_idx + 1}"
+    if not knows_identity:
+        return f"{lane} {side}: face-down (2)"
+    facing = "face-up" if c.face_up else "face-down"
+    return f"{lane} {side}: {d.protocol} {d.value} ({facing})"
 
 
 def _describe_hand_card(state: GameState, player: int, idx: int) -> str:
@@ -1023,7 +1047,7 @@ def _apathy_3(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="opponent", face="up", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(
         prompt="Flip 1 of your opponent's face-up cards", options=opts,
         targets=targets, decider=ap,
@@ -1044,7 +1068,7 @@ def _apathy_4(state, ap, li, card):
                 targets.append((ln, ap, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(
         prompt="You may flip 1 of your face-up covered cards", options=opts,
         targets=targets, optional=True, decider=ap,
@@ -1062,7 +1086,7 @@ def _hate_0(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Delete 1 card", options=opts, targets=targets, decider=ap)
     ln, pl, pos, _ = targets[idx]
     delete_card_from_field(state, ln, pl, pos)
@@ -1076,7 +1100,7 @@ def _hate_1(state, ap, li, card):
         targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
         if not targets:
             return
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt="Delete 1 card", options=opts, targets=targets, decider=ap)
         ln, pl, pos, _ = targets[idx]
         delete_card_from_field(state, ln, pl, pos)
@@ -1099,7 +1123,7 @@ def _hate_2(state, ap, li, card):
             ln, pl, pos, _ = tied[0]
             delete_card_from_field(state, ln, pl, pos)
         else:
-            opts = [_describe_card(state, t[0], t[1], t[3]) for t in tied]
+            opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in tied]
             idx = yield Choice(prompt="Break tie: delete which?", options=opts,
                                targets=tied, decider=ap)
             ln, pl, pos, _ = tied[idx]
@@ -1134,7 +1158,7 @@ def _hate_4_first(state, ap, li, card):
         ln, pl, pos, _ = tied[0]
         delete_card_from_field(state, ln, pl, pos)
     else:
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in tied]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in tied]
         idx = yield Choice(prompt="Break tie", options=opts, targets=tied, decider=ap)
         ln, pl, pos, _ = tied[idx]
         delete_card_from_field(state, ln, pl, pos)
@@ -1224,7 +1248,7 @@ def _love_4(state, ap, li, card):
     targets = _enumerate_uncovered(state, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx2 = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     ln, pl, pos, _ = targets[idx2]
     flip_card(state, ln, pl, pos)
@@ -1251,7 +1275,7 @@ def _darkness_0(state, ap, li, card):
             targets.append((ln, opp, pos, s[pos]))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 of opponent's covered cards",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1265,7 +1289,7 @@ def _darkness_1(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="opponent", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 of opponent's cards",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1294,7 +1318,7 @@ def _darkness_2(state, ap, li, card):
             targets.append((li, pl, pos, s[pos]))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Flip 1 covered card in this line",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1:
@@ -1325,7 +1349,7 @@ def _darkness_4(state, ap, li, card):
     targets = _enumerate_uncovered(state, face="down", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 face-down card",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1349,7 +1373,7 @@ def _death_0(state, ap, li, card):
             sln, spl, spos, _ = targets[0]
             delete_card_from_field(state, sln, spl, spos)
             continue
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt=f"Delete one card from line {ln}",
                            options=opts, targets=targets, decider=ap)
         sln, spl, spos, _ = targets[idx]
@@ -1377,7 +1401,7 @@ def _death_1_start(state, ap, li, card):
     draw_cards(state, ap, 1)
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if targets:
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         i2 = yield Choice(prompt="Delete 1 other card",
                           options=opts, targets=targets, decider=ap)
         sln, spl, spos, _ = targets[i2]
@@ -1415,7 +1439,7 @@ def _death_3(state, ap, li, card):
     targets = _enumerate_uncovered(state, face="down", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Delete 1 face-down card",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1438,7 +1462,7 @@ def _death_4(state, ap, li, card):
                 targets.append((ln, pl, len(s) - 1, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Delete a card with value 0 or 1",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1452,7 +1476,7 @@ def _fire_0(state, ap, li, card):
     # Flip 1 other card. Draw 2 cards.
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if targets:
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt="Flip 1 other card",
                            options=opts, targets=targets, decider=ap)
         sln, spl, spos, _ = targets[idx]
@@ -1467,7 +1491,7 @@ def _fire_0_when_covered(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 other card",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1483,7 +1507,7 @@ def _fire_1(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Delete 1 card",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1499,7 +1523,7 @@ def _fire_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, active_player=ap, exclude=card)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Return 1 card to its owner's hand",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1521,7 +1545,7 @@ def _fire_3_bottom(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
     flip_card(state, sln, spl, spos)
@@ -1572,12 +1596,12 @@ def _gravity_1(state, ap, li, card):
                 if dst == li:
                     continue
                 options.append(
-                    f"FROM {ln} -> {dst}: {_describe_card(state, ln, ap, c)}"
+                    f"FROM {ln} -> {dst}: {_describe_card(state, ln, ap, c, viewer=ap)}"
                 )
                 targets.append((ln, ap, pos, dst))
         else:
             options.append(
-                f"TO {li} <- {ln}: {_describe_card(state, ln, ap, c)}"
+                f"TO {li} <- {ln}: {_describe_card(state, ln, ap, c, viewer=ap)}"
             )
             targets.append((ln, ap, pos, li))
     if not targets:
@@ -1594,7 +1618,7 @@ def _gravity_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 card (will then be shifted to this line)",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1611,7 +1635,7 @@ def _gravity_4(state, ap, li, card):
     targets = _enumerate_uncovered(state, face="down", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 face-down card to this line",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1661,7 +1685,7 @@ def _life_1(state, ap, li, card):
         targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
         if not targets:
             return
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt="Flip 1 card",
                            options=opts, targets=targets, decider=ap)
         sln, spl, spos, _ = targets[idx]
@@ -1674,7 +1698,7 @@ def _life_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, face="down", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Flip 1 face-down card",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1:
@@ -1712,7 +1736,7 @@ def _light_0(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 card; draw cards equal to its value",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -1736,7 +1760,7 @@ def _light_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, face="down", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Reveal 1 face-down card; then shift or flip it",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, c = targets[idx]
@@ -1796,7 +1820,7 @@ def _metal_0(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
     flip_card(state, sln, spl, spos)
@@ -1917,7 +1941,7 @@ def _plague_4_bottom(state, ap, li, card):
             if not c.face_up:
                 targets.append((ln, opp, pos, c))
     if targets:
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt="Opponent deletes one of their face-down cards",
                            options=opts, targets=targets, decider=opp)
         sln, spl, spos, _ = targets[idx]
@@ -1989,7 +2013,7 @@ def _psychic_3(state, ap, li, card):
     targets = _enumerate_shift_targets(state, owner="opponent", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 opponent card",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -2005,7 +2029,7 @@ def _psychic_4_bottom(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="opponent", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Return 1 of opponent's cards to their hand",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1:
@@ -2102,7 +2126,7 @@ def _speed_3(state, ap, li, card):
     targets = _enumerate_shift_targets(state, owner="self", exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 of your other cards",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -2117,7 +2141,7 @@ def _speed_3_bottom(state, ap, li, card):
     targets = _enumerate_shift_targets(state, owner="self", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Shift 1 of your cards (then flip Speed 3)",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1:
@@ -2139,7 +2163,7 @@ def _speed_4(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="opponent", face="down", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 of opponent's face-down cards",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -2198,7 +2222,7 @@ def _spirit_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Flip 1 card",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1:
@@ -2258,7 +2282,7 @@ def _water_0(state, ap, li, card):
     # Flip 1 other card. Flip this card.
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if targets:
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt="Flip 1 other card",
                            options=opts, targets=targets, decider=ap)
         sln, spl, spos, _ = targets[idx]
@@ -2318,7 +2342,7 @@ def _water_4(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="self", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Return 1 of your cards to your hand",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
@@ -2364,7 +2388,7 @@ def _chaos_0(state, ap, li, card):
             t = covered[0]
             flip_card(state, t[0], t[1], t[2])
             continue
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in covered]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in covered]
         idx = yield Choice(
             prompt=f"L{ln}: flip 1 covered card", options=opts,
             targets=covered, decider=ap,
@@ -2412,7 +2436,7 @@ def _chaos_2(state, ap, li, card):
             targets.append((ln, ap, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 of your covered cards",
                        options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
@@ -2622,7 +2646,7 @@ def _corruption_0_top(state, ap, li, card):
         targets.append((li, card.owner, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 face-up card in this stack",
                        options=opts, targets=targets, decider=ap)
     if 0 <= idx < len(targets):
@@ -2639,7 +2663,7 @@ def _corruption_1(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Return 1 card", options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
         return
@@ -2701,7 +2725,7 @@ def _corruption_3(state, ap, li, card):
                 targets.append((ln, pl, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Flip 1 face-up covered card",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1 or not (0 <= idx < len(targets)):
@@ -2790,7 +2814,7 @@ def _courage_1(state, ap, li, card):
         targets.append((ln, opp, len(s) - 1, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Delete 1 opp card in a higher-value line",
                        options=opts, targets=targets, decider=ap)
     if 0 <= idx < len(targets):
@@ -2851,7 +2875,7 @@ def _fear_0(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift or flip 1 card", options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
         return
@@ -2889,7 +2913,7 @@ def _fear_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="opponent", active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Return 1 opp card", options=opts, targets=targets, decider=ap)
     if 0 <= idx < len(targets):
         t = targets[idx]
@@ -2908,7 +2932,7 @@ def _fear_3_bottom(state, ap, li, card):
         targets.append((li, opp, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 opp card in this line",
                        options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
@@ -2972,7 +2996,7 @@ def _ice_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 other card",
                        options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
@@ -3117,7 +3141,7 @@ def _luck_3(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Delete 1 card", options=opts, targets=targets, decider=ap)
     if 0 <= idx < len(targets):
         t = targets[idx]
@@ -3149,7 +3173,7 @@ def _luck_4(state, ap, li, card):
                     targets.append((ln, pl, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt=f"Delete 1 card with value {target_val}",
                        options=opts, targets=targets, decider=ap)
     if 0 <= idx < len(targets):
@@ -3179,7 +3203,7 @@ def _mirror_1_bottom(state, ap, li, card):
                 targets.append((ln, opp, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Resolve opp middle as Mirror 1",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1 or not (0 <= idx < len(targets)):
@@ -3218,7 +3242,7 @@ def _mirror_3(state, ap, li, card):
     own = _enumerate_uncovered(state, owner="self", exclude=card, active_player=ap)
     if not own:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in own]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in own]
     idx = yield Choice(prompt="Flip 1 of your cards", options=opts, targets=own, decider=ap)
     if not (0 <= idx < len(own)):
         return
@@ -3228,7 +3252,7 @@ def _mirror_3(state, ap, li, card):
     opp_in_line = _enumerate_uncovered(state, owner="opponent", line_filter=t[0], active_player=ap)
     if not opp_in_line:
         return
-    opts2 = [_describe_card(state, t[0], t[1], t[3]) for t in opp_in_line]
+    opts2 = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in opp_in_line]
     i2 = yield Choice(prompt="Flip 1 opp card in same line",
                       options=opts2, targets=opp_in_line, decider=ap)
     if 0 <= i2 < len(opp_in_line):
@@ -3310,7 +3334,7 @@ def _peace_3(state, ap, li, card):
                 candidates.append((ln, pl, len(s) - 1, c))
     if not candidates:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in candidates]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in candidates]
     i2 = yield Choice(prompt=f"Flip 1 card with value > {threshold}",
                       options=opts, targets=candidates, decider=ap)
     if 0 <= i2 < len(candidates):
@@ -3362,7 +3386,7 @@ def _smoke_1(state, ap, li, card):
     targets = _enumerate_uncovered(state, owner="self", exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 of your cards (then may shift it)",
                        options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
@@ -3417,7 +3441,7 @@ def _smoke_4(state, ap, li, card):
                 targets.append((ln, pl, pos, c))
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 covered face-down card",
                        options=opts, targets=targets, decider=ap)
     if not (0 <= idx < len(targets)):
@@ -3502,7 +3526,7 @@ def _time_1(state, ap, li, card):
                     continue
                 targets.append((ln, pl, pos, c))
     if targets:
-        opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
         idx = yield Choice(prompt="Flip 1 covered card",
                            options=opts, targets=targets, decider=ap)
         if 0 <= idx < len(targets):
@@ -3606,7 +3630,7 @@ def _war_0_bottom(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Delete 1 card",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1 or not (0 <= idx < len(targets)):
@@ -3627,7 +3651,7 @@ def _war_2(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     if 0 <= idx < len(targets):
         t = targets[idx]
@@ -3771,7 +3795,7 @@ def _unity_0(state, ap, li, card):
     if not targets:
         draw_cards(state, ap, 1)
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     i2 = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     if 0 <= i2 < len(targets):
         t = targets[i2]
@@ -3790,7 +3814,7 @@ def _unity_0_first(state, ap, li, card):
     if not targets:
         draw_cards(state, ap, 1)
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     i2 = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     if 0 <= i2 < len(targets):
         t = targets[i2]
@@ -3804,7 +3828,7 @@ def _unity_3(state, ap, li, card):
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
-    opts = [_describe_card(state, t[0], t[1], t[3]) for t in targets]
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="(optional) Flip 1 card",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1 or not (0 <= idx < len(targets)):

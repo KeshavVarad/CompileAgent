@@ -364,9 +364,32 @@ export function enumerateShiftTargets(state: GameState, opts: EnumOpts): FieldTa
   return targets;
 }
 
-export function describeCard(state: GameState, target: FieldTarget): string {
+/** Render a field target as an option label for a Choice prompt.
+ *  Face-down cards are private information per Codex p.5: the
+ *  perspective player only knows their own face-downs. We hide the
+ *  identity of opp's face-down cards from the choice label (the
+ *  underlying target object still carries the real card so the engine
+ *  resolves correctly — only the displayed string is redacted).
+ *  Record mode is exempt because the recorder is transcribing both
+ *  sides and already knows what was played. */
+export function describeCard(
+  state: GameState,
+  target: FieldTarget,
+  viewer: PlayerIndex | null = null,
+): string {
+  const recordMode = state.config.mode === "record";
+  const ownedByViewer = viewer != null && target.player === viewer;
+  const knowsIdentity = target.card.faceUp || ownedByViewer || recordMode;
+  const sideLabel = viewer == null
+    ? `P${target.player + 1}`
+    : ownedByViewer ? "your" : "opp";
+  const lane = `L${target.line + 1}`;
+  if (!knowsIdentity) {
+    return `${lane} ${sideLabel}: face-down (2)`;
+  }
   const d = CARD_DEFS[target.card.defId];
-  return `L${target.line}/P${target.player}: ${d.protocol} ${d.value} (${target.card.faceUp ? "up" : "dn"})`;
+  const facing = target.card.faceUp ? "face-up" : "face-down";
+  return `${lane} ${sideLabel}: ${d.protocol} ${d.value} (${facing})`;
 }
 
 export function describeHandCard(state: GameState, player: PlayerIndex, idx: number): string {

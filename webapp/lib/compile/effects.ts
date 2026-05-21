@@ -83,7 +83,9 @@ function* chooseFieldTarget(
   optional = false,
 ): EffectGen {
   if (targets.length === 0) return;
-  const options = targets.map((t) => describeCard(state, t));
+  // Render labels from the decider's perspective so face-down identities
+  // on the opp's side stay hidden in the prompt (Codex p.5).
+  const options = targets.map((t) => describeCard(state, t, decider));
   const idx: number = yield {
     prompt, options, targets, optional, decider,
   };
@@ -611,9 +613,9 @@ register(MIDDLE_EFFECTS, "MN01:Gravity:1", function* (state, ap, li) {
   const opts: Opt[] = [];
   for (const t of candidates) {
     if (t.line === li) {
-      for (const dst of [0, 1, 2]) if (dst !== li) opts.push({ label: `FROM ${t.line} -> ${dst}: ${describeCard(state, t)}`, t, dst });
+      for (const dst of [0, 1, 2]) if (dst !== li) opts.push({ label: `FROM ${t.line} -> ${dst}: ${describeCard(state, t, ap)}`, t, dst });
     } else {
-      opts.push({ label: `TO ${li} <- ${t.line}: ${describeCard(state, t)}`, t, dst: li });
+      opts.push({ label: `TO ${li} <- ${t.line}: ${describeCard(state, t, ap)}`, t, dst: li });
     }
   }
   if (opts.length === 0) return;
