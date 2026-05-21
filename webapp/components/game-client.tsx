@@ -513,8 +513,9 @@ function Stack({
               // header + top tier.
               marginTop: displayIdx === 0 ? 0 : -CARD_OVERLAP_PX,
               // Higher card stays in front; lower cards have a lower z so
-              // their hidden tier really is behind the upper card.
-              zIndex: 100 - displayIdx,
+              // their hidden tier really is behind the upper card. Cap the
+              // range at 10 so it stays below the modal dialog's z-50.
+              zIndex: 10 - displayIdx,
               position: "relative",
             }}
           >
