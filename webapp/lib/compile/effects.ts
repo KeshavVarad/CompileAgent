@@ -353,11 +353,36 @@ register(MIDDLE_EFFECTS, "MN01:Darkness:0", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN01:Darkness:1", function* (state, ap) {
+  // "Flip 1 of your opponent's cards. You may shift that card."
   const targets = enumerateUncovered(state, { owner: "opponent", activePlayer: ap });
   yield* chooseFieldTarget("Flip 1 of opponent's cards", targets, state, ap);
   const i = state.scratch["_last_target_idx"] as number | undefined;
   if (i == null || !targets[i]) return;
-  flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
+  const tgt = targets[i];
+  flipCard(state, tgt.line, tgt.player, tgt.pos);
+  // The "that card" reference survives mid-effect even if the flip moved
+  // / deleted the card (Codex p.3 "Selecting and Targeting"). Re-locate
+  // the flipped card by identity; if it's no longer on the field (e.g.
+  // a flip-triggered self-delete on Metal 6), skip the shift.
+  let srcLine = -1;
+  let srcPos = -1;
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const stack = lineStack(state.lines[ln], tgt.player);
+    const idx = stack.indexOf(tgt.card);
+    if (idx >= 0) { srcLine = ln; srcPos = idx; break; }
+  }
+  if (srcLine < 0) return;
+  const dest = [0, 1, 2].filter((l) => l !== srcLine);
+  if (dest.length === 0) return;
+  const dIdx: number = yield {
+    prompt: "(optional) Shift the flipped card to another line",
+    options: dest.map((l) => `shift to L${l + 1}`).concat(["skip"]),
+    targets: (dest as number[]).concat([-1]),
+    optional: true,
+    decider: ap,
+  };
+  if (dIdx === -1 || dest[dIdx] == null) return;
+  shiftCard(state, srcLine, tgt.player, srcPos, dest[dIdx]);
 });
 
 register(MIDDLE_EFFECTS, "MN01:Darkness:2", function* (state, ap, li) {
