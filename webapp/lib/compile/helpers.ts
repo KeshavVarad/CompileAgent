@@ -77,18 +77,41 @@ export function computeLineValue(state: GameState, lineIdx: number, player: Play
 // Atomic mutations
 // ---------------------------------------------------------------------------
 
+// Per-atomic deferred event flags. Set by mutation helpers below; drained
+// by the engine after the current effect stack resolves (mirrors the
+// Python _drain_pending_after_events).
+function flagAfterDiscard(state: GameState, player: PlayerIndex): void {
+  (state.scratch as Record<string, unknown>)[`_pending_after_discard_by_p${player}`] = true;
+}
+function flagAfterDraw(state: GameState, player: PlayerIndex): void {
+  (state.scratch as Record<string, unknown>)[`_pending_after_draw_by_p${player}`] = true;
+}
+function flagAfterDelete(state: GameState, deleter: PlayerIndex): void {
+  (state.scratch as Record<string, unknown>)[`_pending_after_delete_by_p${deleter}`] = true;
+}
+function flagAfterShuffle(state: GameState, player: PlayerIndex): void {
+  (state.scratch as Record<string, unknown>)[`_pending_after_shuffle_by_p${player}`] = true;
+}
+export function flagAfterRefresh(state: GameState, player: PlayerIndex): void {
+  (state.scratch as Record<string, unknown>)[`_pending_after_refresh_by_p${player}`] = true;
+}
+function flagFlip(state: GameState, card: CardInst): void {
+  const lst = ((state.scratch as Record<string, unknown>)["_pending_flip_cards"] ??= []) as CardInst[];
+  lst.push(card);
+}
+
 export function drawCards(state: GameState, player: PlayerIndex, n: number): number {
   if (playerCannotDraw(state, player)) return 0;
   const ps = state.players[player];
   let drawn = 0;
+  let shuffled = false;
   for (let i = 0; i < n; i++) {
     if (ps.deck.length === 0) {
       if (ps.trash.length === 0) break;
       ps.deck = ps.trash;
       ps.trash = [];
       rngShuffle({ state: state.rngState }, ps.deck);
-      // Update RNG state — we burned some randomness shuffling.
-      // (Mulberry32 reads/writes via the closure object; we re-extract.)
+      shuffled = true;
     }
     const c = ps.deck.pop();
     if (c) {
@@ -96,6 +119,8 @@ export function drawCards(state: GameState, player: PlayerIndex, n: number): num
       drawn++;
     }
   }
+  if (drawn > 0) flagAfterDraw(state, player);
+  if (shuffled) flagAfterShuffle(state, player);
   return drawn;
 }
 
@@ -104,6 +129,7 @@ export function discardToTrash(state: GameState, player: PlayerIndex, handIndex:
   const [c] = ps.hand.splice(handIndex, 1);
   c.faceUp = true;
   state.players[c.owner].trash.push(c);
+  flagAfterDiscard(state, player);
   return c;
 }
 
@@ -121,6 +147,9 @@ export function deleteCardFromField(
   if (!wasTop && stack.length && stack[stack.length - 1].faceUp) {
     state.triggers.push({ kind: "uncover", line: lineIdx, player, card: stack[stack.length - 1] });
   }
+  // "After you delete cards:" — attribute to whoever is the active
+  // player at the time of the delete (mirrors Python).
+  flagAfterDelete(state, state.currentPlayer);
   checkDiversity6SelfDestruct(state);
   return c;
 }
@@ -145,6 +174,8 @@ export function flipCard(
       state.triggers.push({ kind: "face_up", line: lineIdx, player, card: c });
     }
   }
+  // `Flip:` emphasis fires on any flip direction.
+  flagFlip(state, c);
   checkDiversity6SelfDestruct(state);
   return c;
 }
@@ -223,6 +254,7 @@ export function refreshPlayer(state: GameState, player: PlayerIndex): void {
   const ps = state.players[player];
   const need = 5 - ps.hand.length;
   if (need > 0) drawCards(state, player, need);
+  flagAfterRefresh(state, player);
 }
 
 // ---------------------------------------------------------------------------

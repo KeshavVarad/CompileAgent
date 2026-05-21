@@ -10,6 +10,7 @@
 
 import { CARD_DEFS } from "./cards";
 import {
+  checkDiversity6SelfDestruct,
   deleteCardFromField,
   describeCard,
   describeHandCard,
@@ -44,11 +45,29 @@ export const BOTTOM_FIRST_EFFECTS: Record<string, EffectFn> = {};
 export const BOTTOM_ON_PLAY_EFFECTS: Record<string, EffectFn> = {};
 export const START_EFFECTS: Record<string, EffectFn> = {};
 export const END_EFFECTS: Record<string, EffectFn> = {};
+// Reserved for unconditional one-shot tops (e.g. Speed 0 top "Play another
+// card") — TOPs with a "Start:" / "End:" / "Flip:" / "After you...:" /
+// "When this card would be ...:" emphasis must register on the matching
+// event-specific registry below instead.
 export const TOP_TRIGGER_EFFECTS: Record<string, EffectFn> = {};
 export const WHEN_COVERED_EFFECTS: Record<string, EffectFn> = {};
+// Event-conditional registries — mirror the Python engine.
+export const AFTER_CLEAR_CACHE_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_SELF_DISCARD_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_OPP_DISCARD_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_SELF_DELETE_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_SELF_DRAW_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_SELF_SHUFFLE_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_SELF_REFRESH_EFFECTS: Record<string, EffectFn> = {};
+export const FLIP_TRIGGER_EFFECTS: Record<string, EffectFn> = {};
+export const WHEN_DELETED_BY_COMPILE_EFFECTS: Record<string, EffectFn> = {};
 
 export function hasWhenCoveredEffect(defId: number): boolean {
   return CARD_DEFS[defId].key in WHEN_COVERED_EFFECTS;
+}
+
+export function hasWhenDeletedByCompileEffect(defId: number): boolean {
+  return CARD_DEFS[defId].key in WHEN_DELETED_BY_COMPILE_EFFECTS;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +255,8 @@ register(MIDDLE_EFFECTS, "AX01:Hate:2", function* (state, ap) {
   }
 });
 
-register(TOP_TRIGGER_EFFECTS, "AX01:Hate:3", function* (state, ap) {
+// Hate 3 top: "After you delete cards: Draw 1 card."
+register(AFTER_SELF_DELETE_EFFECTS, "AX01:Hate:3", function* (state, ap) {
   drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -781,7 +801,9 @@ register(MIDDLE_EFFECTS, "MN01:Metal:3", function* (state, ap, li) {
   }
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN01:Metal:6", function* (state, ap, li, card) {
+// Metal 6 top: "When this card would be covered or flipped: First, delete
+// this card." Two trigger events share the same handler.
+function* metal6SelfDelete(state: GameState, _ap: PlayerIndex, _li: number, card: CardInst): EffectGen {
   for (let ln = 0; ln < NUM_LINES; ln++) {
     for (const pl of [0, 1] as PlayerIndex[]) {
       const stack = lineStack(state.lines[ln], pl);
@@ -790,7 +812,9 @@ register(TOP_TRIGGER_EFFECTS, "MN01:Metal:6", function* (state, ap, li, card) {
     }
   }
   if (false) yield {} as Choice;
-});
+}
+register(WHEN_COVERED_EFFECTS, "MN01:Metal:6", metal6SelfDelete);
+register(FLIP_TRIGGER_EFFECTS, "MN01:Metal:6", metal6SelfDelete);
 
 // ---------------------------------------------------------------------------
 // PLAGUE (MN01)
@@ -800,7 +824,8 @@ register(MIDDLE_EFFECTS, "MN01:Plague:0", function* (state, ap) {
   yield* discardN(state, ap === 0 ? 1 : 0, 1);
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN01:Plague:1", function* (state, ap) {
+// Plague 1 top: "After your opponent discards cards: Draw 1 card."
+register(AFTER_OPP_DISCARD_EFFECTS, "MN01:Plague:1", function* (state, ap) {
   drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -934,7 +959,8 @@ register(MIDDLE_EFFECTS, "MN01:Speed:0", function* (state, ap) {
   if (engine?.playCardForEffect) engine.playCardForEffect(ap, pick.hi, pick.ln, pick.fu);
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN01:Speed:1", function* (state, ap) {
+// Speed 1 top: "After you clear cache: Draw 1 card."
+register(AFTER_CLEAR_CACHE_EFFECTS, "MN01:Speed:1", function* (state, ap) {
   drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -942,6 +968,58 @@ register(TOP_TRIGGER_EFFECTS, "MN01:Speed:1", function* (state, ap) {
 register(MIDDLE_EFFECTS, "MN01:Speed:1", function* (state, ap) {
   drawCards(state, ap, 2);
   if (false) yield {} as Choice;
+});
+
+// Speed 2 top: "When this card would be deleted by compiling: Shift this
+// card, even if this card is covered." Compile-time interrupt: the
+// engine's compile path queries this registry before bulk-deleting the
+// line, gives this handler a chance to shift Speed 2 out, then proceeds.
+register(WHEN_DELETED_BY_COMPILE_EFFECTS, "MN01:Speed:2", function* (state, _ap, _li, card) {
+  const owner = card.owner;
+  let srcLine = -1;
+  let srcPos = -1;
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const s = lineStack(state.lines[ln], owner);
+    const idx = s.indexOf(card);
+    if (idx >= 0) { srcLine = ln; srcPos = idx; break; }
+  }
+  if (srcLine < 0) return;
+  const dest = [0, 1, 2].filter((l) => l !== srcLine);
+  if (dest.length === 0) return;
+  const didx: number = yield {
+    prompt: "Speed 2 would be deleted — shift to which line?",
+    options: dest.map((l) => `shift to L${l}`),
+    targets: dest,
+    optional: false,
+    decider: owner,
+  };
+  if (dest[didx] == null) return;
+  shiftCard(state, srcLine, owner, srcPos, dest[didx]);
+});
+
+// Spirit 3 top: "After you draw cards: You may shift this card, even if
+// this card is covered."
+register(AFTER_SELF_DRAW_EFFECTS, "MN01:Spirit:3", function* (state, _ap, _li, card) {
+  const owner = card.owner;
+  let srcLine = -1;
+  let srcPos = -1;
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const s = lineStack(state.lines[ln], owner);
+    const idx = s.indexOf(card);
+    if (idx >= 0) { srcLine = ln; srcPos = idx; break; }
+  }
+  if (srcLine < 0) return;
+  const dest = [0, 1, 2].filter((l) => l !== srcLine);
+  if (dest.length === 0) return;
+  const didx: number = yield {
+    prompt: "(optional) Shift Spirit 3",
+    options: dest.map((l) => `shift to L${l}`).concat(["skip"]),
+    targets: (dest as number[]).concat([-1]),
+    optional: true,
+    decider: owner,
+  };
+  if (didx === -1 || dest[didx] == null) return;
+  shiftCard(state, srcLine, owner, srcPos, dest[didx]);
 });
 
 register(MIDDLE_EFFECTS, "MN01:Speed:3", function* (state, ap, li, card) {
@@ -1185,7 +1263,9 @@ register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Chaos:4", function* (state, ap) {
 
 // ----- MN02: Clarity -------------------------------------------------------
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
+// Clarity 1 top: "Start: Reveal the top card of your deck. You may
+// discard the top card of your deck."
+register(START_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
   const ps = state.players[ap];
   if (ps.deck.length === 0 && ps.trash.length > 0) {
     ps.deck = ps.trash; ps.trash = [];
@@ -1319,7 +1399,9 @@ register(MIDDLE_EFFECTS, "MN02:Clarity:4", function* (state, ap) {
 
 // ----- MN02: Corruption ----------------------------------------------------
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Corruption:0", function* (state, ap, li, card) {
+// Corruption 0 top: "Flip: Flip 1 face-up covered or uncovered card in
+// this stack other than this card."
+register(FLIP_TRIGGER_EFFECTS, "MN02:Corruption:0", function* (state, ap, li, card) {
   const stack = lineStack(state.lines[li], card.owner);
   const targets: FieldTarget[] = [];
   stack.forEach((c, pos) => {
@@ -1353,7 +1435,8 @@ register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Corruption:1", function* (state) {
   if (false) yield {} as Choice;
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Corruption:2", function* (state, ap) {
+// Corruption 2 top: "After you discard cards: Your opponent discards 1 card."
+register(AFTER_SELF_DISCARD_EFFECTS, "MN02:Corruption:2", function* (state, ap) {
   yield* discardN(state, (ap === 0 ? 1 : 0) as PlayerIndex, 1);
 });
 
@@ -1381,7 +1464,8 @@ register(MIDDLE_EFFECTS, "MN02:Corruption:3", function* (state, ap) {
   flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Corruption:6", function* (state, ap, li, card) {
+// Corruption 6 top: "End: Either discard 1 card or delete this card."
+register(END_EFFECTS, "MN02:Corruption:6", function* (state, ap, li, card) {
   if (state.players[ap].hand.length === 0) {
     // Forced self-delete.
     for (let ln = 0; ln < 3; ln++) {
@@ -1409,7 +1493,8 @@ register(TOP_TRIGGER_EFFECTS, "MN02:Corruption:6", function* (state, ap, li, car
 
 // ----- MN02: Courage -------------------------------------------------------
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Courage:0", function* (state, ap) {
+// Courage 0 top: "Start: If you have no cards in hand, draw 1 card."
+register(START_EFFECTS, "MN02:Courage:0", function* (state, ap) {
   if (state.players[ap].hand.length === 0) drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -1475,7 +1560,9 @@ register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Courage:3", function* (state, ap, li, car
   if (pos >= 0) shiftCard(state, li, ap, pos, best);
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Courage:6", function* (state, ap, li, card) {
+// Courage 6 top: "End: If your opponent has a higher value in this line
+// than you do, flip this card."
+register(END_EFFECTS, "MN02:Courage:6", function* (state, ap, li, card) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const { computeLineValue } = require("./helpers");
   if (computeLineValue(state, li, opp) > computeLineValue(state, li, ap)) {
@@ -2048,7 +2135,9 @@ register(MIDDLE_EFFECTS, "MN02:Time:1", function* (state, ap) {
   }
 });
 
-register(TOP_TRIGGER_EFFECTS, "MN02:Time:2", function* (state, ap, li, card) {
+// Time 2 top (Codex 8/2025 errata): "After you shuffle your deck: Draw 1
+// card. Then, you may shift this card."
+register(AFTER_SELF_SHUFFLE_EFFECTS, "MN02:Time:2", function* (state, ap, li, card) {
   drawCards(state, ap, 1);
   const s = lineStack(state.lines[li], card.owner);
   const pos = s.indexOf(card);
@@ -2077,6 +2166,7 @@ register(MIDDLE_EFFECTS, "MN02:Time:2", function* (state, ap) {
     const { rngShuffle } = require("./rng");
     rngShuffle(rng, ps.deck);
     state.rngState = rng.state;
+    (state.scratch as Record<string, unknown>)[`_pending_after_shuffle_by_p${ap}`] = true;
   }
 });
 
@@ -2111,7 +2201,8 @@ register(MIDDLE_EFFECTS, "MN02:Time:4", function* (state, ap) {
 
 // ----- MN02: War -----------------------------------------------------------
 
-register(TOP_TRIGGER_EFFECTS, "MN02:War:0", function* (state, ap, li, card) {
+// War 0 top: "After you refresh: You may flip this card."
+register(AFTER_SELF_REFRESH_EFFECTS, "MN02:War:0", function* (state, ap, li, card) {
   const idx: number = yield {
     prompt: "(optional) Flip War 0 now?",
     options: ["flip", "skip"], targets: [0, -1], optional: true, decider: ap,
@@ -2223,10 +2314,15 @@ register(MIDDLE_EFFECTS, "AX02:Assimilation:4", function* (state, ap) {
 });
 
 // ----- AX02: Diversity -----------------------------------------------------
-// Diversity 6's "if there are not at least 3 different protocols on cards in
-// the field, delete this card" is a CONTINUOUS predicate handled by
-// `checkDiversity6SelfDestruct` inside helpers.ts (called after every field
-// mutation). No effect entry needed.
+// Diversity 6 top: "End: If there are not at least 3 different protocols
+// on cards in the field, delete this card." Codex says this is an End
+// trigger, not continuous. The `checkDiversity6SelfDestruct` continuous
+// sweep in helpers.ts remains as a defence-in-depth safety net but the
+// rules-correct fire point is the End trigger below.
+register(END_EFFECTS, "AX02:Diversity:6", function* (state) {
+  checkDiversity6SelfDestruct(state);
+  if (false) yield {} as Choice;
+});
 
 // ----- AX02: Unity ---------------------------------------------------------
 
@@ -2322,4 +2418,40 @@ export function getTopTriggerEffect(defId: number): EffectFn | null {
 export function getWhenCoveredEffect(defId: number): EffectFn | null {
   const k = keyForDefId(defId);
   return k == null ? null : (WHEN_COVERED_EFFECTS[k] ?? null);
+}
+export function getAfterClearCacheEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_CLEAR_CACHE_EFFECTS[k] ?? null);
+}
+export function getAfterSelfDiscardEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_SELF_DISCARD_EFFECTS[k] ?? null);
+}
+export function getAfterOppDiscardEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_OPP_DISCARD_EFFECTS[k] ?? null);
+}
+export function getAfterSelfDeleteEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_SELF_DELETE_EFFECTS[k] ?? null);
+}
+export function getAfterSelfDrawEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_SELF_DRAW_EFFECTS[k] ?? null);
+}
+export function getAfterSelfShuffleEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_SELF_SHUFFLE_EFFECTS[k] ?? null);
+}
+export function getAfterSelfRefreshEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_SELF_REFRESH_EFFECTS[k] ?? null);
+}
+export function getFlipTriggerEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (FLIP_TRIGGER_EFFECTS[k] ?? null);
+}
+export function getWhenDeletedByCompileEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (WHEN_DELETED_BY_COMPILE_EFFECTS[k] ?? null);
 }
