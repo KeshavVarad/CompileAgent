@@ -23,7 +23,17 @@ type Selection =
   | { kind: "board"; lineIndex: number; stackIndex: number }
   | { kind: "opp-hand"; handIndex: number };
 
-type Props = { gameId: string; initialView: GameView };
+type Props = { gameId: string; initialView: GameView; initialTotalActions: number };
+
+type AnalysisSnapshot = {
+  view: GameView;
+  index: number;
+  totalActions: number;
+  lastAction: Action | null;
+  lastLabel: string | null;
+  lastEvents: string[];
+  actor: 0 | 1 | null;
+};
 
 type IdentityRequest = {
   /** The action the recorder picked but hasn't submitted yet — it's missing
@@ -111,8 +121,16 @@ type Frame =
   | { kind: "announce"; label: string; events: string[]; announceMs: number }
   | { kind: "apply"; view: GameView; settleMs: number };
 
-export function GameClient({ gameId, initialView }: Props) {
-  const [view, setView] = useState<GameView>(initialView);
+export function GameClient({ gameId, initialView, initialTotalActions }: Props) {
+  const [liveView, setLiveView] = useState<GameView>(initialView);
+  const [totalActions, setTotalActions] = useState<number>(initialTotalActions);
+  // Analysis mode lets the player scrub through past actions read-only.
+  // `analysisIndex` is the snapshot position (0 .. totalActions); null
+  // means we're at the live state and the player can act.
+  const [analysisIndex, setAnalysisIndex] = useState<number | null>(null);
+  const [analysisSnap, setAnalysisSnap] = useState<AnalysisSnapshot | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const inAnalysis = analysisIndex !== null;
   const [pending, startTransition] = useTransition();
   const [selection, setSelection] = useState<Selection | null>(null);
   const [identityReq, setIdentityReq] = useState<IdentityRequest | null>(null);
@@ -153,7 +171,7 @@ export function GameClient({ gameId, initialView }: Props) {
       return () => clearTimeout(t);
     } else {
       const t = setTimeout(() => {
-        setView(next.view);
+        setLiveView(next.view);
         const tt = setTimeout(() => setBotFrames(rest), next.settleMs);
         void tt;
       }, 0);
@@ -175,6 +193,7 @@ export function GameClient({ gameId, initialView }: Props) {
   const submit = useCallback(
     (action: Action) => {
       if (animating) return; // gate input during bot playback
+      if (inAnalysis) return; // read-only while scrubbing history
       startTransition(async () => {
         setSelection(null);
         setIdentityReq(null);
@@ -193,12 +212,13 @@ export function GameClient({ gameId, initialView }: Props) {
           const postUser = (data.postUserView ?? data.view) as GameView;
           const userEvents = (data.userEvents ?? []) as string[];
           const steps = (data.botSteps ?? []) as BotStep[];
+          if (typeof data.totalActions === "number") setTotalActions(data.totalActions);
           // Show the user's-action result immediately, then let the
           // effect animate through the bot's chain. If the user's own
           // action emitted info events (e.g. their card text tried to
           // do something impossible), toast them so the player sees
           // why the visual change didn't match expectations.
-          setView(postUser);
+          setLiveView(postUser);
           for (const e of userEvents) toast.message(e);
           setBotLastLabel(null);
           setBotLastEvents([]);
@@ -221,8 +241,71 @@ export function GameClient({ gameId, initialView }: Props) {
         }
       });
     },
-    [gameId, animating],
+    [gameId, animating, inAnalysis],
   );
+
+  // Fetch the snapshot whenever the player navigates to a new index.
+  // Bounded by [0, totalActions]; clamping happens server-side too but
+  // the client guards against out-of-range requests.
+  useEffect(() => {
+    if (analysisIndex === null) return;
+    let cancelled = false;
+    (async () => {
+      setAnalysisLoading(true);
+      try {
+        const res = await fetch(`/api/games/${gameId}/snapshot?index=${analysisIndex}`);
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          if (!cancelled) toast.error(err.error || `Snapshot failed (${res.status})`);
+          return;
+        }
+        const data = (await res.json()) as AnalysisSnapshot;
+        if (cancelled) return;
+        setAnalysisSnap(data);
+        if (typeof data.totalActions === "number") setTotalActions(data.totalActions);
+      } catch (e) {
+        if (!cancelled) toast.error(e instanceof Error ? e.message : "Snapshot failed");
+      } finally {
+        if (!cancelled) setAnalysisLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [gameId, analysisIndex]);
+
+  // Keyboard nav while in analysis mode: ←/→ step, Home/End jump,
+  // Esc exits. Bound on window so it works regardless of focus.
+  useEffect(() => {
+    if (!inAnalysis) return;
+    const onKey = (e: KeyboardEvent) => {
+      // Don't hijack typing in inputs/textareas.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setAnalysisIndex((i) => (i === null ? null : Math.max(0, i - 1)));
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setAnalysisIndex((i) => (i === null ? null : Math.min(totalActions, i + 1)));
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        setAnalysisIndex(0);
+      } else if (e.key === "End") {
+        e.preventDefault();
+        setAnalysisIndex(totalActions);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setAnalysisIndex(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [inAnalysis, totalActions]);
+
+  // In analysis mode we render the historical snapshot; the live state
+  // remains untouched so submit() (disabled anyway) and the bot-chain
+  // animation queue stay coherent. Until the first snapshot arrives we
+  // keep showing the live view so the layout doesn't blink.
+  const view: GameView = inAnalysis && analysisSnap ? analysisSnap.view : liveView;
 
   // In record mode the recorder's seat is fixed regardless of whose turn it
   // is; the same recorder enters both seats' actions. In play mode, the
@@ -237,6 +320,7 @@ export function GameClient({ gameId, initialView }: Props) {
 
   const handIndicesWithActions = useMemo(() => {
     const set = new Set<number>();
+    if (inAnalysis) return set; // read-only while scrubbing
     // In record mode while the opponent is the active decider, the legal
     // actions are *opponent* actions; the recorder's own hand cards have no
     // legal moves until the engine swings back. Don't highlight them.
@@ -250,10 +334,11 @@ export function GameClient({ gameId, initialView }: Props) {
       }
     }
     return set;
-  }, [view.legalActions, recordingOppTurn]);
+  }, [view.legalActions, recordingOppTurn, inAnalysis]);
 
   const oppHandIndicesWithActions = useMemo(() => {
     const set = new Set<number>();
+    if (inAnalysis) return set;
     if (!recordingOppTurn) return set;
     for (const a of view.legalActions) {
       if (
@@ -264,20 +349,21 @@ export function GameClient({ gameId, initialView }: Props) {
       }
     }
     return set;
-  }, [view.legalActions, recordingOppTurn]);
+  }, [view.legalActions, recordingOppTurn, inAnalysis]);
 
   const boardKeysWithActions = useMemo(() => {
     const set = new Set<string>();
+    if (inAnalysis) return set;
     for (const a of view.legalActions) {
       if (a.type === "SHIFT_OWN_CARD" && typeof a.lineIndex === "number" && typeof a.handIndex === "number") {
         set.add(`${a.lineIndex}:${a.handIndex}`);
       }
     }
     return set;
-  }, [view.legalActions]);
+  }, [view.legalActions, inAnalysis]);
 
   const selectionActions = useMemo<ActionView[]>(() => {
-    if (!selection) return [];
+    if (!selection || inAnalysis) return [];
     if (selection.kind === "hand" || selection.kind === "opp-hand") {
       return view.legalActions.filter(
         (a) =>
@@ -291,16 +377,35 @@ export function GameClient({ gameId, initialView }: Props) {
         && a.lineIndex === selection.lineIndex
         && a.handIndex === selection.stackIndex,
     );
-  }, [selection, view.legalActions]);
+  }, [selection, view.legalActions, inAnalysis]);
 
   const globalActions = useMemo<ActionView[]>(
-    () => view.legalActions.filter((a) => a.type === "REFRESH" || a.type === "COMPILE_LINE"),
-    [view.legalActions],
+    () => inAnalysis ? [] : view.legalActions.filter((a) => a.type === "REFRESH" || a.type === "COMPILE_LINE"),
+    [view.legalActions, inAnalysis],
   );
+
+  const canEnterAnalysis = !animating && !pending && totalActions > 0;
 
   return (
     <div className="flex-1 mx-auto w-full max-w-6xl px-6 py-6">
-      <TopBar view={view} />
+      <TopBar
+        view={view}
+        analysisOpen={inAnalysis}
+        canEnterAnalysis={canEnterAnalysis}
+        onEnterAnalysis={() => setAnalysisIndex(totalActions)}
+      />
+
+      {inAnalysis && (
+        <AnalysisBar
+          index={analysisIndex ?? 0}
+          totalActions={totalActions}
+          snap={analysisSnap}
+          loading={analysisLoading}
+          playerLabels={[view.config.player0Label, view.config.player1Label]}
+          onIndex={(i) => setAnalysisIndex(Math.max(0, Math.min(totalActions, i)))}
+          onExit={() => setAnalysisIndex(null)}
+        />
+      )}
 
       {view.draft ? (
         <DraftPanel view={view} onPick={(p) => submit({ type: "DRAFT_PROTOCOL", protocol: p as Protocol })} pending={pending} />
@@ -343,7 +448,7 @@ export function GameClient({ gameId, initialView }: Props) {
         </>
       )}
 
-      <ChoiceDialog view={view} onSubmit={submit} pending={pending} />
+      {!inAnalysis && <ChoiceDialog view={view} onSubmit={submit} pending={pending} />}
 
       {selection && selectionActions.length > 0 && (
         <SelectionBar
@@ -400,7 +505,17 @@ export function GameClient({ gameId, initialView }: Props) {
   );
 }
 
-function TopBar({ view }: { view: GameView }) {
+function TopBar({
+  view,
+  analysisOpen,
+  canEnterAnalysis,
+  onEnterAnalysis,
+}: {
+  view: GameView;
+  analysisOpen: boolean;
+  canEnterAnalysis: boolean;
+  onEnterAnalysis: () => void;
+}) {
   const phase = view.phase.replace("_", " ").toLowerCase();
   const mode = view.config.mode ?? "play";
   return (
@@ -420,11 +535,94 @@ function TopBar({ view }: { view: GameView }) {
           </Badge>
         )}
       </div>
-      <div className="text-xs font-mono text-muted-foreground">
-        seed {view.config.seed} · max {view.config.maxTurns} turns
-        {view.config.includeExpansion ? " · +expansion" : ""}
+      <div className="flex items-center gap-3">
+        <Button
+          variant={analysisOpen ? "default" : "outline"}
+          size="sm"
+          className="h-7 text-xs"
+          disabled={!canEnterAnalysis || analysisOpen}
+          onClick={onEnterAnalysis}
+          title="Step through past actions (←/→, Home/End, Esc)"
+        >
+          {analysisOpen ? "analysis" : "↶ analysis"}
+        </Button>
+        <span className="text-xs font-mono text-muted-foreground">
+          seed {view.config.seed} · max {view.config.maxTurns} turns
+          {view.config.includeExpansion ? " · +expansion" : ""}
+        </span>
       </div>
     </div>
+  );
+}
+
+function AnalysisBar({
+  index,
+  totalActions,
+  snap,
+  loading,
+  playerLabels,
+  onIndex,
+  onExit,
+}: {
+  index: number;
+  totalActions: number;
+  snap: AnalysisSnapshot | null;
+  loading: boolean;
+  playerLabels: [string, string];
+  onIndex: (i: number) => void;
+  onExit: () => void;
+}) {
+  const atStart = index <= 0;
+  const atEnd = index >= totalActions;
+  // Show the action that brought us into this state. At index=0 there's
+  // nothing applied yet, so we show "initial state".
+  const actor = snap?.actor;
+  const label = snap?.lastLabel;
+  const events = snap?.lastEvents ?? [];
+  return (
+    <Card className="mb-3 border-sky-500/40 bg-sky-500/5">
+      <CardContent className="py-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <Badge variant="default" className="text-[10px] uppercase shrink-0">analysis</Badge>
+            <span className="text-xs font-mono text-muted-foreground shrink-0">
+              action {index} / {totalActions}
+            </span>
+            {index === 0 ? (
+              <span className="text-sm text-muted-foreground truncate">
+                Initial state — before any actions.
+              </span>
+            ) : label ? (
+              <span className="text-sm truncate">
+                <span className="font-mono text-muted-foreground mr-1">
+                  {actor != null ? playerLabels[actor] : "?"}:
+                </span>
+                {label}
+              </span>
+            ) : loading ? (
+              <span className="text-sm text-muted-foreground">loading…</span>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={atStart} onClick={() => onIndex(0)} title="First (Home)">«</Button>
+            <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={atStart} onClick={() => onIndex(index - 1)} title="Prev (←)">‹ prev</Button>
+            <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={atEnd} onClick={() => onIndex(index + 1)} title="Next (→)">next ›</Button>
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" disabled={atEnd} onClick={() => onIndex(totalActions)} title="Last (End)">»</Button>
+            <Separator orientation="vertical" className="h-5 mx-1" />
+            <Button variant="default" size="sm" className="h-7 px-3 text-xs" onClick={onExit} title="Return to live (Esc)">
+              exit
+            </Button>
+          </div>
+        </div>
+        {events.length > 0 && (
+          <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground">
+            {events.map((e, i) => (
+              <li key={i}>· {e}</li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

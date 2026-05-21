@@ -26,5 +26,6 @@ export default async function GamePage({ params }: { params: Promise<{ id: strin
   }
   const game = gameFromRow(row);
   const view = viewOfGame(game);
-  return <GameClient gameId={row.id} initialView={view} />;
+  const totalActions = (row.actions as unknown[]).length;
+  return <GameClient gameId={row.id} initialView={view} initialTotalActions={totalActions} />;
 }
