@@ -497,15 +497,18 @@ function Stack({
       </div>
     );
   }
-  // engine stack[last] is uncovered; render top-to-bottom with uncovered at top.
-  // Cards in the column physically overlap so the upper card covers the lower
-  // card's header + top tier, leaving only the M+B tiers of covered cards
-  // visible — matching how a real Compile play-stack looks.
+  // engine stack[last] is uncovered. Render in natural stack order
+  // (oldest at the visual top, newest/uncovered at the visual bottom).
+  // Each later card overlaps the previous card's M+B tiers from below,
+  // leaving the previous card's header + top tier exposed — matching the
+  // Codex "the value and top command are always visible when covered"
+  // rule. zIndex grows with stack position so the newer (covering) card
+  // sits in front of the one it covers. Capped at 30 to stay below the
+  // modal dialog's z-50.
   const lastIndex = stack.length - 1;
   return (
     <div className="px-2 py-2 flex flex-col items-stretch">
-      {[...stack].reverse().map((c, displayIdx) => {
-        const stackIdx = lastIndex - displayIdx;
+      {stack.map((c, stackIdx) => {
         const interactive = owner === "me" && boardKeysWithActions.has(`${lineIndex}:${stackIdx}`);
         const selected =
           selection?.kind === "board"
@@ -515,20 +518,21 @@ function Stack({
           <div
             key={c.instId}
             style={{
-              // Pull each non-top card upward so the card above covers its
-              // header + top tier.
-              marginTop: displayIdx === 0 ? 0 : -CARD_OVERLAP_PX,
-              // Higher card stays in front; lower cards have a lower z so
-              // their hidden tier really is behind the upper card. Cap the
-              // range at 10 so it stays below the modal dialog's z-50.
-              zIndex: 10 - displayIdx,
+              // Pull each later card upward so it overlaps the previous
+              // card's M + B + footer (the bottom 112px of the previous
+              // card). The previous card's header + top tier stays
+              // exposed above this card.
+              marginTop: stackIdx === 0 ? 0 : -CARD_OVERLAP_PX,
+              // Later cards in front so their full body shows and the
+              // overlap region hides the older card's bottom tiers.
+              zIndex: 10 + stackIdx,
               position: "relative",
             }}
           >
             <PlayCard
               card={c}
               variant="board"
-              uncovered={displayIdx === 0}
+              uncovered={stackIdx === lastIndex}
               hidden={owner === "opp" && !c.faceUp}
               selected={selected}
               onClick={

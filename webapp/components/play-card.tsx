@@ -12,9 +12,10 @@ type Props = {
    *  face-down on field). Hand cards in record mode use this implicitly via
    *  the placeholder defId=-1. */
   hidden?: boolean;
-  /** Field-only: whether this card sits on top of its stack. Toggles which
-   *  tier is highlighted as the currently-active effect (T when uncovered,
-   *  M when covered). */
+  /** Field-only: whether this card sits on top of its stack. Currently
+   *  unused for active-tier highlighting (top is persistent so we always
+   *  highlight T while face-up), but kept on the API so the parent can
+   *  still distinguish stack position if it ever needs to. */
   uncovered?: boolean;
   selected?: boolean;
   onClick?: () => void;
@@ -24,9 +25,13 @@ type Props = {
 
 // Fixed dimensions so stacked field cards overlap by a predictable amount.
 // Layout: header (28) + 3 tiers (52 each) + footer (8) = 192px total.
-// Stack overlap = header + top tier = 80px → covered cards reveal M+B only.
+// Stack overlap = middle + bottom + footer = 112px → the upper card hides
+// the lower card's M + B tiers, leaving header + top tier visible. This
+// matches Codex p.13 ("Top Command — Persistent: this passive text is
+// never covered") and the rulebook back-cover note ("always ensure that
+// the Value and the Top Command are always visible when covered").
 export const CARD_TOTAL_PX = 192;
-export const CARD_OVERLAP_PX = 80;
+export const CARD_OVERLAP_PX = 112;
 
 export function PlayCard({
   card,
@@ -53,15 +58,18 @@ export function PlayCard({
   const headerLabel = isBoardFaceDown ? "face-down" : card.protocol;
   const headerValue = isBoardFaceDown ? 2 : card.value;
 
-  // Which tier is "active" right now:
-  //   board, uncovered → T  (top fires; middle suppressed)
-  //   board, covered   → M  (middle fires; top suppressed by overlap)
-  //   board, face-down → none
-  //   hand             → none (all three shown equally; no position yet)
-  const activeTier: "T" | "M" | null =
-    variant === "board" && !isBoardFaceDown
-      ? (uncovered ? "T" : "M")
-      : null;
+  // Which tier is "active" right now (Codex p.13 "Card Anatomy"):
+  //   board, face-up         → T  (top is "Persistent" — passive text
+  //                                 active while face-up regardless of
+  //                                 cover state)
+  //   board, face-down       → none
+  //   hand                   → none (no position yet)
+  // (Middle is "Immediate" — fires once on play/flip/uncover, no
+  //  continuous active state. Bottom is "Auxiliary" — viable only when
+  //  uncovered, but mostly event-triggered rather than passive, so we
+  //  don't highlight it as continuously live.)
+  const activeTier: "T" | null =
+    variant === "board" && !isBoardFaceDown ? "T" : null;
 
   return (
     <div
@@ -104,7 +112,7 @@ export function PlayCard({
         </span>
       </div>
       <CardTier label="T" text={card.topText} active={activeTier === "T"} faceDown={isBoardFaceDown} />
-      <CardTier label="M" text={card.middleText} active={activeTier === "M"} faceDown={isBoardFaceDown} />
+      <CardTier label="M" text={card.middleText} active={false} faceDown={isBoardFaceDown} />
       <CardTier label="B" text={card.bottomText} active={false} faceDown={isBoardFaceDown} />
     </div>
   );
