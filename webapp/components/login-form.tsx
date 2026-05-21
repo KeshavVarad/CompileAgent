@@ -50,7 +50,7 @@ export function LoginForm({ next }: { next: string }) {
       </h1>
 
       <p className="text-xs text-muted-foreground mb-6">
-        Play against Sparkv1 or transcribe live Compile games for AI review.{" "}
+        Play against Sparkv2 or transcribe live Compile games for AI review.{" "}
         <a
           href="https://github.com/KeshavVarad/CompileAgent"
           target="_blank"
