@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { desc, eq } from "drizzle-orm";
 
+import { DeleteGameButton } from "@/components/delete-game-button";
 import { LogoutButton } from "@/components/logout-button";
 import { NewGameDialog } from "@/components/new-game-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -93,8 +94,8 @@ export default async function Home() {
                 const winnerLabel =
                   g.winner == null ? null : g.winner === 0 ? g.player0Label : g.player1Label;
                 return (
-                  <li key={g.id}>
-                    <Link href={`/games/${g.id}`} className="block group">
+                  <li key={g.id} className="relative group">
+                    <Link href={`/games/${g.id}`} className="block">
                       <Card className="transition-colors group-hover:bg-accent/50">
                         <CardHeader className="pb-2">
                           <div className="flex items-center justify-between gap-3">
@@ -130,6 +131,12 @@ export default async function Home() {
                         </CardContent>
                       </Card>
                     </Link>
+                    {/* Sits on top of the link via absolute positioning, with
+                        pointer events on; its onClick stops propagation so
+                        clicking 'delete' doesn't navigate to the game. */}
+                    <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <DeleteGameButton gameId={g.id} variant="card" />
+                    </div>
                   </li>
                 );
               })}
