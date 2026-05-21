@@ -165,8 +165,10 @@ handles this:
 
 Three discrete effect tiers (Top / Middle / Bottom) on every card, with
 physical-style stack overlap on the field: the upper card covers the
-lower card's header + top tier, leaving M+B visible — matching the
-in-play rule that the top effect is suppressed when covered.
+lower card's middle + bottom tiers, leaving the value and top tier
+visible — matching the Codex rule that the top command is *persistent*
+(passive text active while face-up, regardless of cover) and the bottom
+command is only viable when uncovered.
 
 ---
 
