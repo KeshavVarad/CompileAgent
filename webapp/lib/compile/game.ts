@@ -297,17 +297,24 @@ export class Game {
 
   private drive(): void {
     const st = this.state;
-    // Drain effects, then any deferred "after X" broadcasts, then drain
-    // again. Loop until stable or a decision is needed.
+    // One big loop: drain effects/triggers, then take one step of phase
+    // advancement, then back to drain. The earlier two-loop structure
+    // (drain THEN phase) had a deadlock: doStartPhase/doEndPhase push
+    // effects onto _pending and the old code immediately returned to the
+    // caller. If every pushed effect resolved trivially (no yield, no
+    // choice), those effects would never get drained until the next
+    // step() — but step() doesn't fire until the user submits an action,
+    // and the user has no actions to submit because phase is mid-START.
+    // Looping back to drain after each push lets trivial effects clear
+    // on the spot and only yields to the client when a real decision
+    // actually surfaces.
     while (true) {
       if (this.drainPending()) return;
-      if (!this.drainPendingAfterEvents()) break;
-    }
-    // Phase advancement.
-    while (true) {
+      if (this.drainPendingAfterEvents()) continue;
+      // Phase advancement: one step per loop iteration, then back to drain.
       if (st.phase === "GAME_OVER") return;
       if (st.phase === "DRAFT") return;
-      if (st.phase === "START") { if (this.doStartPhase()) return; continue; }
+      if (st.phase === "START") { this.doStartPhase(); continue; }
       if (st.phase === "CHECK_CONTROL") { this.doCheckControl(); continue; }
       if (st.phase === "CHECK_COMPILE") {
         if (this.compileableLines(st.currentPlayer).length > 0) return;
@@ -319,20 +326,21 @@ export class Game {
         if (playerSkipsCheckCache(st, st.currentPlayer)) { st.phase = "END"; continue; }
         if (ps.hand.length <= HAND_SIZE_LIMIT) {
           // Cache phase complete — fire `After you clear cache:` triggers if
-          // a discard happened, then drain them before END.
+          // a discard happened, then drain them before END (handled by the
+          // outer loop's next drain pass).
           const ap = st.currentPlayer;
           const fk = `_pending_after_clear_cache_p${ap}`;
           const scratch = st.scratch as Record<string, unknown>;
           if (scratch[fk]) {
             delete scratch[fk];
             this.broadcastAfterClearCache(ap);
-            if (this.drainPending()) return;
           }
           st.phase = "END"; continue;
         }
         return;
       }
-      if (st.phase === "END") { if (this.doEndPhase()) return; continue; }
+      if (st.phase === "END") { this.doEndPhase(); continue; }
+      return; // unreachable — defensive
     }
   }
 
