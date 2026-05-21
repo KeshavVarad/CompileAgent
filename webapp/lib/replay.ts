@@ -39,7 +39,26 @@ export async function autoAdvanceBot(
   seat0: RandomBot | NNBot | null,
   seat1: RandomBot | NNBot | null,
 ): Promise<Action[]> {
+  const { applied } = await autoAdvanceBotWithSnapshots(
+    game, seat0, seat1, () => undefined, () => undefined,
+  );
+  return applied;
+}
+
+/** Variant of `autoAdvanceBot` that captures snapshots around each bot
+ *  step. The `pre` callback runs against the game BEFORE the step
+ *  lands (so it can read about-to-be-played card details), `post`
+ *  receives the pre-callback's output plus the game AFTER the step
+ *  (so it can serialise a `GameView` of the new state). */
+export async function autoAdvanceBotWithSnapshots<P, T>(
+  game: Game,
+  seat0: RandomBot | NNBot | null,
+  seat1: RandomBot | NNBot | null,
+  pre: (game: Game, action: Action) => P,
+  post: (action: Action, captured: P, game: Game) => T,
+): Promise<{ applied: Action[]; snapshots: T[] }> {
   const applied: Action[] = [];
+  const snapshots: T[] = [];
   const guard = 500;
   for (let i = 0; i < guard; i++) {
     if (game.isOver()) break;
@@ -51,10 +70,12 @@ export async function autoAdvanceBot(
     const action = bot instanceof NNBot
       ? await bot.chooseAsync(game, legal)
       : bot.choose(game, legal);
+    const captured = pre(game, action);
     game.step(action);
     applied.push(action);
+    snapshots.push(post(action, captured, game));
   }
-  return applied;
+  return { applied, snapshots };
 }
 
 /** Instantiate the bot for a stored strategy. Anything we don't recognise

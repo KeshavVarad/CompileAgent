@@ -34,14 +34,64 @@ type IdentityRequest = {
   forSeat: 0 | 1;
 };
 
+// Delay between bot snapshots during animated playback. Tuned so each
+// bot step is readable but a long chain doesn't drag for half a minute.
+// Quick moves (plays / discards / draws) get the short delay; the slower
+// COMPILE_LINE / PLAY_FACE_UP that visibly mutate stacks get a longer
+// pause so the player can absorb the change.
+const BOT_STEP_DELAY_MS = 700;
+const BOT_STEP_DELAY_BIG_MS = 1100;
+const BOT_STEP_INITIAL_DELAY_MS = 350;
+
+function delayFor(action: Action): number {
+  if (action.type === "COMPILE_LINE" || action.type === "PLAY_FACE_UP") {
+    return BOT_STEP_DELAY_BIG_MS;
+  }
+  return BOT_STEP_DELAY_MS;
+}
+
+type BotStep = { action: Action; label: string; view: GameView };
+
 export function GameClient({ gameId, initialView }: Props) {
   const [view, setView] = useState<GameView>(initialView);
   const [pending, startTransition] = useTransition();
   const [selection, setSelection] = useState<Selection | null>(null);
   const [identityReq, setIdentityReq] = useState<IdentityRequest | null>(null);
+  // Currently-playing bot animation. While `botQueue` has items, the
+  // client is mid-replay of Sparkv2's chain; user input should be
+  // gated. `botLastAction` is the most recent bot action label to
+  // surface on the status banner.
+  const [botQueue, setBotQueue] = useState<BotStep[]>([]);
+  const [botLastLabel, setBotLastLabel] = useState<string | null>(null);
+  const animating = botQueue.length > 0;
+
+  // Step through the queued bot snapshots one at a time, updating the
+  // visible view and the "last bot action" label as we go. Cleared
+  // automatically when the queue empties.
+  useEffect(() => {
+    if (botQueue.length === 0) return;
+    const [next, ...rest] = botQueue;
+    const initial = botLastLabel === null;
+    const wait = initial ? BOT_STEP_INITIAL_DELAY_MS : delayFor(next.action);
+    const t = setTimeout(() => {
+      setView(next.view);
+      setBotLastLabel(next.label);
+      setBotQueue(rest);
+    }, wait);
+    return () => clearTimeout(t);
+  }, [botQueue, botLastLabel]);
+
+  // Clear the "last bot action" label a moment after the chain ends so
+  // the banner returns to a normal turn-status message.
+  useEffect(() => {
+    if (botQueue.length > 0 || botLastLabel === null) return;
+    const t = setTimeout(() => setBotLastLabel(null), 1400);
+    return () => clearTimeout(t);
+  }, [botQueue, botLastLabel]);
 
   const submit = useCallback(
     (action: Action) => {
+      if (animating) return; // gate input during bot playback
       startTransition(async () => {
         setSelection(null);
         setIdentityReq(null);
@@ -57,13 +107,19 @@ export function GameClient({ gameId, initialView }: Props) {
             return;
           }
           const data = await res.json();
-          setView(data.view as GameView);
+          const postUser = (data.postUserView ?? data.view) as GameView;
+          const steps = (data.botSteps ?? []) as BotStep[];
+          // Show the user's-action result immediately, then let the
+          // effect animate through the bot's chain.
+          setView(postUser);
+          setBotLastLabel(null);
+          setBotQueue(steps);
         } catch (e) {
           toast.error(e instanceof Error ? e.message : "Step failed");
         }
       });
     },
-    [gameId],
+    [gameId, animating],
   );
 
   // In record mode the recorder's seat is fixed regardless of whose turn it
@@ -165,7 +221,14 @@ export function GameClient({ gameId, initialView }: Props) {
             boardKeysWithActions={boardKeysWithActions}
             onSelect={(s) => setSelection(s)}
           />
-          <TurnStatusBanner view={view} me={me} pending={pending} />
+          <TurnStatusBanner
+            view={view}
+            me={me}
+            pending={pending}
+            botActionLabel={botLastLabel}
+            animating={animating}
+            queueRemaining={botQueue.length}
+          />
           <PlayerStrip view={view} side={me} isMe />
           <HandRow
             view={view}
@@ -884,12 +947,37 @@ function groupSelectionActions(actions: ActionView[]): { heading: string; action
 }
 
 function TurnStatusBanner({
-  view, me, pending,
-}: { view: GameView; me: 0 | 1; pending: boolean }) {
+  view, me, pending, botActionLabel, animating, queueRemaining,
+}: {
+  view: GameView;
+  me: 0 | 1;
+  pending: boolean;
+  botActionLabel: string | null;
+  animating: boolean;
+  queueRemaining: number;
+}) {
   if (view.isOver || view.draft) return null;
   const decider = view.decider;
   const oppLabel = me === 0 ? view.config.player1Label : view.config.player0Label;
   const phase = view.phase;
+
+  // During bot-chain playback, surface what the opponent is doing right
+  // now in big text — that's the whole point of the slow transitions.
+  if (animating && botActionLabel) {
+    return (
+      <Card className="my-3 border-amber-500/40">
+        <CardContent className="py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="text-[10px] uppercase">{oppLabel}</Badge>
+            <span className="text-sm font-medium">{botActionLabel}</span>
+          </div>
+          <span className="text-xs font-mono text-muted-foreground">
+            {queueRemaining > 0 ? `${queueRemaining} more step${queueRemaining === 1 ? "" : "s"}…` : "playing chain…"}
+          </span>
+        </CardContent>
+      </Card>
+    );
+  }
 
   // Mid-effect choice prompts take priority — they're displayed in their
   // own modal/bar via ChoiceDialog, so we just label the situation here.
