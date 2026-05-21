@@ -1,0 +1,63 @@
+"""Train the Compile NN agent via PPO.
+
+Usage:
+    python scripts/train_nn.py --iters 200 --device auto --save-dir runs/v1
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "src"))
+
+from compile_engine.nn.train import TrainConfig, train
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--iters", type=int, default=500)
+    ap.add_argument("--games-per-iter", type=int, default=32)
+    ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "mps", "cuda"])
+    ap.add_argument("--save-dir", type=str, default=None)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--snapshot-every", type=int, default=10)
+    ap.add_argument("--eval-games", type=int, default=60)
+    ap.add_argument("--expansion-prob", type=float, default=0.5,
+                    help="probability of including AX01 (Apathy/Hate/Love) per game")
+    ap.add_argument("--main2-prob", type=float, default=0.4,
+                    help="probability of including MN02 (Chaos/Clarity/.../War) per game")
+    ap.add_argument("--aux2-prob", type=float, default=0.4,
+                    help="probability of including AX02 (Assimilation/Diversity/Unity) per game")
+    ap.add_argument("--target-kl", type=float, default=0.03,
+                    help="break PPO epoch loop once approx-KL exceeds this; <=0 disables")
+    ap.add_argument("--pool-threshold", type=float, default=0.7,
+                    help="only add snapshots to opponent pool once wr_random ≥ this")
+    ap.add_argument("--max-pool-size", type=int, default=6,
+                    help="cap total opponent pool size; oldest NN snapshot evicted on overflow")
+    args = ap.parse_args()
+
+    cfg = TrainConfig(
+        iters=args.iters,
+        games_per_iter=args.games_per_iter,
+        lr=args.lr,
+        device=args.device,
+        save_dir=args.save_dir,
+        seed=args.seed,
+        snapshot_every=args.snapshot_every,
+        eval_games=args.eval_games,
+        expansion_prob=args.expansion_prob,
+        main2_prob=args.main2_prob,
+        aux2_prob=args.aux2_prob,
+        target_kl=args.target_kl if args.target_kl > 0 else None,
+        pool_threshold_wr_random=args.pool_threshold,
+        max_pool_size=args.max_pool_size,
+    )
+    train(cfg)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,460 @@
+/**
+ * Atomic helpers + value computation. Ported 1:1 from
+ * src/compile_engine/effects.py — same semantics, same trigger queue.
+ */
+
+import { CARD_DEFS } from "./cards";
+import { rngShuffle } from "./rng";
+import type { CardInst, GameState, LineState, PlayerIndex } from "./types";
+import { FACE_DOWN_BASE_VALUE, NUM_LINES } from "./types";
+
+export function lineStack(line: LineState, player: PlayerIndex): CardInst[] {
+  return player === 0 ? line.p0Stack : line.p1Stack;
+}
+
+export function setLineStack(line: LineState, player: PlayerIndex, stack: CardInst[]): void {
+  if (player === 0) line.p0Stack = stack;
+  else line.p1Stack = stack;
+}
+
+// ---------------------------------------------------------------------------
+// Value computation
+// ---------------------------------------------------------------------------
+
+function stackFaceDownBaseValue(state: GameState, lineIdx: number, player: PlayerIndex): number {
+  const stack = lineStack(state.lines[lineIdx], player);
+  let base = FACE_DOWN_BASE_VALUE;
+  for (const c of stack) {
+    if (!c.faceUp) continue;
+    const d = CARD_DEFS[c.defId];
+    if (d.protocol === "Darkness" && d.value === 2) {
+      base = Math.max(base, 4);
+    }
+  }
+  return base;
+}
+
+function cardsInLineBoth(state: GameState, lineIdx: number): CardInst[] {
+  return [...state.lines[lineIdx].p0Stack, ...state.lines[lineIdx].p1Stack];
+}
+
+export function computeLineValue(state: GameState, lineIdx: number, player: PlayerIndex): number {
+  const stack = lineStack(state.lines[lineIdx], player);
+  const opp: PlayerIndex = player === 0 ? 1 : 0;
+  const fdValue = stackFaceDownBaseValue(state, lineIdx, player);
+  let total = 0;
+  for (const c of stack) {
+    if (c.faceUp) total += CARD_DEFS[c.defId].value;
+    else total += fdValue;
+  }
+
+  const fdCountInLine = cardsInLineBoth(state, lineIdx).filter((c) => !c.faceUp).length;
+  const oppStack = lineStack(state.lines[lineIdx], opp);
+  for (const c of stack) {
+    if (!c.faceUp) continue;
+    const d = CARD_DEFS[c.defId];
+    // Apathy 0 top: +1 per face-down in line (both sides).
+    if (d.protocol === "Apathy" && d.value === 0) total += fdCountInLine;
+    // Smoke 2 top (MN02): same as Apathy 0.
+    if (d.protocol === "Smoke" && d.value === 2) total += fdCountInLine;
+    // Mirror 0 top (MN02): +1 per opp card in line.
+    if (d.protocol === "Mirror" && d.value === 0) total += oppStack.length;
+    // Clarity 0 top (MN02): +1 per card in own hand.
+    if (d.protocol === "Clarity" && d.value === 0) total += state.players[player].hand.length;
+  }
+
+  // Metal 0 top (opp side): reduces our value by 2.
+  for (const c of oppStack) {
+    if (!c.faceUp) continue;
+    const d = CARD_DEFS[c.defId];
+    if (d.protocol === "Metal" && d.value === 0) total -= 2;
+  }
+
+  return Math.max(total, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Atomic mutations
+// ---------------------------------------------------------------------------
+
+export function drawCards(state: GameState, player: PlayerIndex, n: number): number {
+  if (playerCannotDraw(state, player)) return 0;
+  const ps = state.players[player];
+  let drawn = 0;
+  for (let i = 0; i < n; i++) {
+    if (ps.deck.length === 0) {
+      if (ps.trash.length === 0) break;
+      ps.deck = ps.trash;
+      ps.trash = [];
+      rngShuffle({ state: state.rngState }, ps.deck);
+      // Update RNG state — we burned some randomness shuffling.
+      // (Mulberry32 reads/writes via the closure object; we re-extract.)
+    }
+    const c = ps.deck.pop();
+    if (c) {
+      ps.hand.push(c);
+      drawn++;
+    }
+  }
+  return drawn;
+}
+
+export function discardToTrash(state: GameState, player: PlayerIndex, handIndex: number): CardInst {
+  const ps = state.players[player];
+  const [c] = ps.hand.splice(handIndex, 1);
+  c.faceUp = true;
+  state.players[c.owner].trash.push(c);
+  return c;
+}
+
+export function deleteCardFromField(
+  state: GameState,
+  lineIdx: number,
+  player: PlayerIndex,
+  stackPos: number,
+): CardInst {
+  const stack = lineStack(state.lines[lineIdx], player);
+  const wasTop = stackPos === stack.length - 1;
+  const [c] = stack.splice(stackPos, 1);
+  c.faceUp = true;
+  state.players[c.owner].trash.push(c);
+  if (!wasTop && stack.length && stack[stack.length - 1].faceUp) {
+    state.triggers.push({ kind: "uncover", line: lineIdx, player, card: stack[stack.length - 1] });
+  }
+  checkDiversity6SelfDestruct(state);
+  return c;
+}
+
+export function flipCard(
+  state: GameState,
+  lineIdx: number,
+  player: PlayerIndex,
+  stackPos: number,
+): CardInst {
+  const stack = lineStack(state.lines[lineIdx], player);
+  const c = stack[stackPos];
+  const wasUp = c.faceUp;
+  c.faceUp = !c.faceUp;
+  if (!wasUp && c.faceUp) {
+    if (c.defId === -1) {
+      // Record-mode placeholder being revealed. Push reveal_placeholder
+      // first; fireNextTrigger handles it by yielding a Choice for identity
+      // and re-pushing the face_up trigger so effects fire normally after.
+      state.triggers.push({ kind: "reveal_placeholder", line: lineIdx, player, card: c });
+    } else {
+      state.triggers.push({ kind: "face_up", line: lineIdx, player, card: c });
+    }
+  }
+  checkDiversity6SelfDestruct(state);
+  return c;
+}
+
+export function shiftCard(
+  state: GameState,
+  srcLine: number,
+  srcPlayer: PlayerIndex,
+  srcPos: number,
+  dstLine: number,
+): CardInst {
+  const stackSrc = lineStack(state.lines[srcLine], srcPlayer);
+  const wasTop = srcPos === stackSrc.length - 1;
+  const [c] = stackSrc.splice(srcPos, 1);
+  c.isCommitted = true;
+  const stackDst = lineStack(state.lines[dstLine], srcPlayer);
+  const soonCovered = stackDst.length ? stackDst[stackDst.length - 1] : null;
+  stackDst.push(c);
+  // Push triggers in LIFO-reverse-chronological order; see Python shift_card.
+  if (c.faceUp && !wasTop) {
+    state.triggers.push({ kind: "uncover", line: dstLine, player: srcPlayer, card: c });
+  }
+  state.triggers.push({ kind: "uncommit", card: c });
+  if (soonCovered && soonCovered.faceUp) {
+    // We rely on hasWhenCoveredEffect being false for most cards; we still
+    // push the trigger so the engine can decide.
+    state.triggers.push({
+      kind: "when_covered", line: dstLine, player: soonCovered.owner, card: soonCovered,
+    });
+  }
+  if (!wasTop && stackSrc.length && stackSrc[stackSrc.length - 1].faceUp) {
+    state.triggers.push({ kind: "uncover", line: srcLine, player: srcPlayer, card: stackSrc[stackSrc.length - 1] });
+  }
+  checkDiversity6SelfDestruct(state);
+  return c;
+}
+
+export function returnCardToHand(
+  state: GameState,
+  lineIdx: number,
+  player: PlayerIndex,
+  stackPos: number,
+): CardInst {
+  const stack = lineStack(state.lines[lineIdx], player);
+  const wasTop = stackPos === stack.length - 1;
+  const [c] = stack.splice(stackPos, 1);
+  c.faceUp = false;
+  state.players[c.owner].hand.push(c);
+  if (!wasTop && stack.length && stack[stack.length - 1].faceUp) {
+    state.triggers.push({ kind: "uncover", line: lineIdx, player, card: stack[stack.length - 1] });
+  }
+  checkDiversity6SelfDestruct(state);
+  return c;
+}
+
+export function playTopDeckFaceDown(
+  state: GameState,
+  player: PlayerIndex,
+  lineIdx: number,
+): CardInst | null {
+  const ps = state.players[player];
+  if (ps.deck.length === 0) {
+    if (ps.trash.length === 0) return null;
+    ps.deck = ps.trash;
+    ps.trash = [];
+    rngShuffle({ state: state.rngState }, ps.deck);
+    if (ps.deck.length === 0) return null;
+  }
+  const c = ps.deck.pop()!;
+  c.faceUp = false;
+  lineStack(state.lines[lineIdx], player).push(c);
+  return c;
+}
+
+export function refreshPlayer(state: GameState, player: PlayerIndex): void {
+  const ps = state.players[player];
+  const need = 5 - ps.hand.length;
+  if (need > 0) drawCards(state, player, need);
+}
+
+// ---------------------------------------------------------------------------
+// Target enumeration
+// ---------------------------------------------------------------------------
+
+export type FieldTarget = {
+  line: number;
+  player: PlayerIndex;
+  pos: number;
+  card: CardInst;
+};
+
+export type EnumOpts = {
+  owner?: "any" | "self" | "opponent";   // default any
+  face?: "any" | "up" | "down";          // default any
+  exclude?: CardInst | null;
+  activePlayer: PlayerIndex;
+  lineFilter?: number | null;
+};
+
+export function enumerateUncovered(state: GameState, opts: EnumOpts): FieldTarget[] {
+  const out: FieldTarget[] = [];
+  for (let li = 0; li < NUM_LINES; li++) {
+    if (opts.lineFilter != null && li !== opts.lineFilter) continue;
+    for (const pl of [0, 1] as PlayerIndex[]) {
+      const stack = lineStack(state.lines[li], pl);
+      if (stack.length === 0) continue;
+      const c = stack[stack.length - 1];
+      if (c.isCommitted) continue;
+      if (opts.exclude && c === opts.exclude) continue;
+      if (opts.owner === "self" && pl !== opts.activePlayer) continue;
+      if (opts.owner === "opponent" && pl === opts.activePlayer) continue;
+      if (opts.face === "up" && !c.faceUp) continue;
+      if (opts.face === "down" && c.faceUp) continue;
+      out.push({ line: li, player: pl, pos: stack.length - 1, card: c });
+    }
+  }
+  return out;
+}
+
+export function enumerateAll(state: GameState, opts: EnumOpts): FieldTarget[] {
+  const out: FieldTarget[] = [];
+  for (let li = 0; li < NUM_LINES; li++) {
+    if (opts.lineFilter != null && li !== opts.lineFilter) continue;
+    for (const pl of [0, 1] as PlayerIndex[]) {
+      const stack = lineStack(state.lines[li], pl);
+      stack.forEach((c, pos) => {
+        if (c.isCommitted) return;
+        if (opts.exclude && c === opts.exclude) return;
+        if (opts.owner === "self" && pl !== opts.activePlayer) return;
+        if (opts.owner === "opponent" && pl === opts.activePlayer) return;
+        if (opts.face === "up" && !c.faceUp) return;
+        if (opts.face === "down" && c.faceUp) return;
+        out.push({ line: li, player: pl, pos, card: c });
+      });
+    }
+  }
+  return out;
+}
+
+function isShiftTargetableWhileCovered(card: CardInst): boolean {
+  if (!card.faceUp) return false;
+  const d = CARD_DEFS[card.defId];
+  return (d.protocol === "Speed" && d.value === 2) || (d.protocol === "Spirit" && d.value === 3);
+}
+
+export function enumerateShiftTargets(state: GameState, opts: EnumOpts): FieldTarget[] {
+  const targets = enumerateUncovered(state, opts);
+  if (opts.face === "up" || opts.face === "any" || opts.face === undefined) {
+    for (let li = 0; li < NUM_LINES; li++) {
+      if (opts.lineFilter != null && li !== opts.lineFilter) continue;
+      for (const pl of [0, 1] as PlayerIndex[]) {
+        if (opts.owner === "self" && pl !== opts.activePlayer) continue;
+        if (opts.owner === "opponent" && pl === opts.activePlayer) continue;
+        const stack = lineStack(state.lines[li], pl);
+        for (let pos = 0; pos < stack.length - 1; pos++) {
+          const c = stack[pos];
+          if (c.isCommitted) continue;
+          if (opts.exclude && c === opts.exclude) continue;
+          if (isShiftTargetableWhileCovered(c)) {
+            targets.push({ line: li, player: pl, pos, card: c });
+          }
+        }
+      }
+    }
+  }
+  return targets;
+}
+
+export function describeCard(state: GameState, target: FieldTarget): string {
+  const d = CARD_DEFS[target.card.defId];
+  return `L${target.line}/P${target.player}: ${d.protocol} ${d.value} (${target.card.faceUp ? "up" : "dn"})`;
+}
+
+export function describeHandCard(state: GameState, player: PlayerIndex, idx: number): string {
+  const c = state.players[player].hand[idx];
+  const d = CARD_DEFS[c.defId];
+  return `hand[${idx}]: ${d.protocol} ${d.value}`;
+}
+
+// ---------------------------------------------------------------------------
+// Persistent rule queries (used by game.ts for legal-action filtering)
+// ---------------------------------------------------------------------------
+
+export function middleSuppressed(state: GameState, lineIdx: number, card: CardInst): boolean {
+  // Apathy 2 — line-local suppression.
+  for (const c of cardsInLineBoth(state, lineIdx)) {
+    if (c === card || !c.faceUp) continue;
+    const d = CARD_DEFS[c.defId];
+    if (d.protocol === "Apathy" && d.value === 2) return true;
+  }
+  // Fear 0 — global suppression of opponent middles during active turn.
+  const ap = state.currentPlayer;
+  if (card.owner !== ap) {
+    for (let li = 0; li < NUM_LINES; li++) {
+      for (const cc of lineStack(state.lines[li], ap)) {
+        if (!cc.faceUp) continue;
+        const d = CARD_DEFS[cc.defId];
+        if (d.protocol === "Fear" && d.value === 0) return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function checkDiversity6SelfDestruct(state: GameState): void {
+  // Continuous predicate: while < 3 distinct protocols are on the field, any
+  // face-up Diversity 6 self-deletes. Mirrors the Python helper.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const protos = new Set<string>();
+    for (let li = 0; li < NUM_LINES; li++) {
+      for (const pl of [0, 1] as PlayerIndex[]) {
+        for (const c of lineStack(state.lines[li], pl)) {
+          protos.add(CARD_DEFS[c.defId].protocol);
+        }
+      }
+    }
+    if (protos.size >= 3) return;
+    let found = false;
+    for (let li = 0; li < NUM_LINES && !found; li++) {
+      for (const pl of [0, 1] as PlayerIndex[]) {
+        if (found) break;
+        const s = lineStack(state.lines[li], pl);
+        for (let pos = 0; pos < s.length; pos++) {
+          const c = s[pos];
+          if (!c.faceUp) continue;
+          const d = CARD_DEFS[c.defId];
+          if (d.protocol === "Diversity" && d.value === 6) {
+            s.splice(pos, 1);
+            c.faceUp = true;
+            state.players[c.owner].trash.push(c);
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!found) return;
+  }
+}
+
+export function playerCannotDraw(state: GameState, player: PlayerIndex): boolean {
+  // Ice 6: "If you have any cards in your hand, you cannot draw cards."
+  if (state.players[player].hand.length === 0) return false;
+  for (let li = 0; li < NUM_LINES; li++) {
+    for (const c of lineStack(state.lines[li], player)) {
+      if (!c.faceUp) continue;
+      const d = CARD_DEFS[c.defId];
+      if (d.protocol === "Ice" && d.value === 6) return true;
+    }
+  }
+  return false;
+}
+
+export function playerCanCompile(state: GameState, player: PlayerIndex): boolean {
+  return !state.players[player].cannotCompileNextTurn;
+}
+
+export function oppPlayFacedownBlockedInLine(state: GameState, lineIdx: number, player: PlayerIndex): boolean {
+  const opp: PlayerIndex = player === 0 ? 1 : 0;
+  const stack = lineStack(state.lines[lineIdx], opp);
+  for (const c of stack) {
+    if (!c.faceUp) continue;
+    const d = CARD_DEFS[c.defId];
+    if (d.protocol === "Metal" && d.value === 2) return true;
+  }
+  return false;
+}
+
+export function oppMustPlayFacedown(state: GameState, player: PlayerIndex): boolean {
+  const opp: PlayerIndex = player === 0 ? 1 : 0;
+  for (let li = 0; li < NUM_LINES; li++) {
+    for (const c of lineStack(state.lines[li], opp)) {
+      if (!c.faceUp) continue;
+      const d = CARD_DEFS[c.defId];
+      if (d.protocol === "Psychic" && d.value === 1) return true;
+    }
+  }
+  return false;
+}
+
+export function oppPlayBlockedInLine(state: GameState, lineIdx: number, player: PlayerIndex): boolean {
+  const opp: PlayerIndex = player === 0 ? 1 : 0;
+  const stack = lineStack(state.lines[lineIdx], opp);
+  if (stack.length === 0) return false;
+  const top = stack[stack.length - 1];
+  if (!top.faceUp) return false;
+  const d = CARD_DEFS[top.defId];
+  return d.protocol === "Plague" && d.value === 0;
+}
+
+export function playerMayPlayAnyLineFaceup(state: GameState, player: PlayerIndex): boolean {
+  for (let li = 0; li < NUM_LINES; li++) {
+    for (const c of lineStack(state.lines[li], player)) {
+      if (!c.faceUp) continue;
+      const d = CARD_DEFS[c.defId];
+      if (d.protocol === "Spirit" && d.value === 1) return true;
+    }
+  }
+  return false;
+}
+
+export function playerSkipsCheckCache(state: GameState, player: PlayerIndex): boolean {
+  for (let li = 0; li < NUM_LINES; li++) {
+    const stack = lineStack(state.lines[li], player);
+    if (stack.length === 0) continue;
+    const top = stack[stack.length - 1];
+    if (!top.faceUp) continue;
+    const d = CARD_DEFS[top.defId];
+    if (d.protocol === "Spirit" && d.value === 0) return true;
+  }
+  return false;
+}

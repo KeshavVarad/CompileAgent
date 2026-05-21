@@ -1,0 +1,61 @@
+# ----------------------------------------------------------------------------
+# Python
+# ----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# ----------------------------------------------------------------------------
+# Node / Next / Vercel
+# ----------------------------------------------------------------------------
+node_modules/
+.next/
+.turbo/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+
+# ----------------------------------------------------------------------------
+# Environment + secrets
+# ----------------------------------------------------------------------------
+.env
+.env.*
+!.env.development.local.example
+!.env.example
+
+# ----------------------------------------------------------------------------
+# Training artefacts (large / not needed for reproducing from src)
+# ----------------------------------------------------------------------------
+# Per-run directories with checkpoints + logs + per-game JSONL. The curated
+# Sparkv1 export is in webapp/public/models/ and is committed.
+runs/
+
+# Sidecar weights from torch.onnx.export — we re-inline these via the
+# export script so the .onnx file is self-contained.
+*.onnx.data
+
+# Scratch / smoke
+/tmp/
+runs/smoke*/
+
+# ----------------------------------------------------------------------------
+# OS / editor
+# ----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+*.iml
+
+# ----------------------------------------------------------------------------
+# Local-only Claude / agent state
+# ----------------------------------------------------------------------------
+.claude/
