@@ -34,10 +34,28 @@ def main() -> None:
                     help="probability of including AX02 (Assimilation/Diversity/Unity) per game")
     ap.add_argument("--target-kl", type=float, default=0.03,
                     help="break PPO epoch loop once approx-KL exceeds this; <=0 disables")
-    ap.add_argument("--pool-threshold", type=float, default=0.7,
+    ap.add_argument("--pool-threshold", type=float, default=0.0,
                     help="only add snapshots to opponent pool once wr_random ≥ this")
-    ap.add_argument("--max-pool-size", type=int, default=6,
-                    help="cap total opponent pool size; oldest NN snapshot evicted on overflow")
+    ap.add_argument("--max-pool-size", type=int, default=16,
+                    help="cap total opponent pool size; the most-beaten non-anchor "
+                         "snapshot is evicted on overflow")
+    ap.add_argument("--entropy-floor", type=float, default=0.4,
+                    help="adaptive c_entropy target floor for policy entropy. "
+                         "set to <0 to disable adaptive entropy and use fixed c_entropy.")
+    ap.add_argument("--entropy-ceiling", type=float, default=0.55,
+                    help="upper end of the entropy comfort band (when measured "
+                         "entropy is above this, c_entropy is eased down)")
+    ap.add_argument("--c-entropy-start", type=float, default=0.01,
+                    help="initial value for c_entropy before adaptive scaling kicks in")
+    ap.add_argument("--pfsp-p", type=float, default=2.0,
+                    help="PFSP exponent; sampling weight = max(min_weight, "
+                         "(1-WR)^p). p=0 is uniform, higher focuses harder on "
+                         "weak spots.")
+    ap.add_argument("--pfsp-min-weight", type=float, default=0.04,
+                    help="floor on PFSP weights so even fully-beaten opponents "
+                         "still get sampled occasionally")
+    ap.add_argument("--pfsp-window", type=int, default=80,
+                    help="rolling window length for per-opponent win-rate")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -55,6 +73,12 @@ def main() -> None:
         target_kl=args.target_kl if args.target_kl > 0 else None,
         pool_threshold_wr_random=args.pool_threshold,
         max_pool_size=args.max_pool_size,
+        c_entropy=args.c_entropy_start,
+        entropy_floor=args.entropy_floor if args.entropy_floor >= 0 else None,
+        entropy_ceiling=args.entropy_ceiling,
+        pfsp_p=args.pfsp_p,
+        pfsp_min_weight=args.pfsp_min_weight,
+        pfsp_window=args.pfsp_window,
     )
     train(cfg)
 

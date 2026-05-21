@@ -16,7 +16,8 @@ import copy
 import json
 import random
 import time
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -49,16 +50,41 @@ class TrainConfig:
     # `target_kl`. Standard PPO trick to keep updates inside the trust region.
     # Set to None to disable.
     target_kl: float | None = 0.03
+    # Adaptive entropy regularization. We watched our previous 260-iter run
+    # collapse entropy from ~0.83 → ~0.20, which froze the policy onto a
+    # narrow strategy (face-down ratio stuck at ~10%, three-protocol draft
+    # spam). Holding entropy near `entropy_floor` keeps exploration alive
+    # without manually tuning `c_entropy` mid-run: if entropy drops below
+    # the floor we scale `c_entropy` up; if it climbs comfortably above
+    # `entropy_ceiling` we scale it back down. Clamped to the safety range
+    # below. Set entropy_floor to None to disable and use a fixed c_entropy.
+    entropy_floor: float | None = 0.4
+    entropy_ceiling: float = 0.55
+    c_entropy_step: float = 1.15   # multiplicative bump per iter when off-target
+    c_entropy_min: float = 0.001
+    c_entropy_max: float = 0.5
     snapshot_every: int = 10
     eval_games: int = 60
-    # Snapshots are always checkpointed to disk; an opponent pool snapshot is
-    # only added once we're meaningfully beating random — otherwise the pool
-    # fills with weak imitations of the current policy.
-    pool_threshold_wr_random: float = 0.7
-    # Total opponent pool cap (Random + Greedy baselines + NN snapshots).
-    # Once exceeded, the oldest NN snapshot is evicted on each new addition,
-    # so per-iter dt stays bounded as training progresses.
-    max_pool_size: int = 6
+    # Snapshots are always checkpointed to disk. With PFSP sampling weak
+    # snapshots get downweighted automatically, so we drop the old
+    # "only add to pool above some WR_random threshold" gate — pool
+    # diversity is what we want, PFSP handles quality.
+    pool_threshold_wr_random: float = 0.0
+    # Pool cap. PFSP weighting (see OpponentPool) keeps per-iter cost
+    # bounded since we still only sample one opponent per game, so 20 is
+    # cheap (each NN opp is ~2.4 MB on MPS). Was 6 with FIFO; bumped to
+    # 16 to let the policy face a real distribution of historical styles.
+    max_pool_size: int = 16
+    # Prioritized Fictitious Self-Play exponent. p=0 → uniform sampling.
+    # p=2 → strongly biased toward opponents we currently lose to. Higher
+    # p focuses harder on weak spots but reduces diversity. AlphaStar used
+    # p=2.0 for the league. min_weight floors each opponent so the
+    # weakest pool members still get sampled occasionally (training
+    # against baselines is good for stability).
+    pfsp_p: float = 2.0
+    pfsp_min_weight: float = 0.04
+    # Rolling window size for the win-rate estimate used by PFSP.
+    pfsp_window: int = 80
     expansion_prob: float = 0.5    # mix AX01 (Apathy/Hate/Love) in training
     main2_prob: float = 0.4        # mix MN02 (Chaos/Clarity/.../War) in training
     aux2_prob: float = 0.4         # mix AX02 (Assimilation/Diversity/Unity) in training
@@ -76,6 +102,106 @@ def _make_config(rng: random.Random, base: TrainConfig) -> GameConfig:
         seed=rng.randint(0, 2**31 - 1),
         max_turns=base.max_turns,
     )
+
+
+# ---------------------------------------------------------------------------
+# Opponent pool with Prioritized Fictitious Self-Play (PFSP)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _PoolMember:
+    """One entry in the opponent pool: an agent, a stable display name, and
+    a rolling window of recent game outcomes against the trainee."""
+    agent: object                         # RandomAgent | GreedyAgent | NNAgent
+    name: str
+    # results[i] = 1 if the trainee beat this opponent, 0 otherwise.
+    # Bounded length = TrainConfig.pfsp_window.
+    results: deque = field(default_factory=deque)
+
+
+class OpponentPool:
+    """League pool that samples opponents weighted by current weakness.
+
+    Per-opponent we track a rolling-window win rate WR (trainee's win rate
+    vs that opponent). Sampling weight is `max(min_weight, (1 - WR)^p)`,
+    so opponents the trainee currently loses to are over-represented while
+    everyone still gets some non-zero share. This is the same recipe
+    AlphaStar's league used to crack training plateaus.
+
+    Eviction policy: when the pool exceeds `max_size`, we drop the
+    member with the **highest trainee WR** (most beaten = least useful
+    as a training opponent). Anchors (random / greedy) are exempt
+    because their roles in the pool are stability-of-eval, not depth.
+    """
+
+    def __init__(self, max_size: int, p: float, min_weight: float, window: int) -> None:
+        self.max_size = max_size
+        self.p = p
+        self.min_weight = min_weight
+        self.window = window
+        self.members: list[_PoolMember] = []
+        # Anchors get exempted from eviction so absolute Elo stays
+        # interpretable across the run.
+        self._anchor_names: set[str] = set()
+
+    def add(self, agent: object, name: str, *, is_anchor: bool = False) -> str | None:
+        """Add `agent` to the pool, evicting the most-beaten non-anchor
+        if over capacity. Returns the name of the evicted member (or None)."""
+        self.members.append(_PoolMember(
+            agent=agent, name=name,
+            results=deque(maxlen=self.window),
+        ))
+        if is_anchor:
+            self._anchor_names.add(name)
+        evicted: str | None = None
+        if len(self.members) > self.max_size:
+            # Find the non-anchor with the highest WR (most beaten).
+            candidates = [(i, self._wr(m)) for i, m in enumerate(self.members)
+                          if m.name not in self._anchor_names]
+            if candidates:
+                idx = max(candidates, key=lambda t: t[1])[0]
+                evicted = self.members[idx].name
+                self.members.pop(idx)
+        return evicted
+
+    def sample(self, rng: random.Random) -> _PoolMember:
+        if not self.members:
+            raise RuntimeError("pool is empty")
+        weights = [self._weight(m) for m in self.members]
+        total = sum(weights)
+        if total <= 0:
+            # Degenerate (would only happen with all-zero floors + WR=1.0
+            # everywhere) — fall back to uniform.
+            return rng.choice(self.members)
+        r = rng.random() * total
+        acc = 0.0
+        for m, w in zip(self.members, weights):
+            acc += w
+            if r <= acc:
+                return m
+        return self.members[-1]
+
+    def record(self, member: _PoolMember, trainee_won: bool) -> None:
+        member.results.append(1 if trainee_won else 0)
+
+    def _wr(self, m: _PoolMember) -> float:
+        if not m.results:
+            # New entrant: treat as 50/50 so it gets a moderate weight
+            # right away rather than being maxed out.
+            return 0.5
+        return sum(m.results) / len(m.results)
+
+    def _weight(self, m: _PoolMember) -> float:
+        wr = self._wr(m)
+        return max(self.min_weight, (1.0 - wr) ** self.p)
+
+    def __len__(self) -> int:
+        return len(self.members)
+
+    def summary(self) -> list[tuple[str, float, int]]:
+        """List of (name, trainee_wr, n_games) for logging."""
+        return [(m.name, self._wr(m), len(m.results)) for m in self.members]
 
 
 def play_episode(
@@ -233,6 +359,38 @@ def ppo_update(
     return stats
 
 
+class _ConfigWithEntropy:
+    """Thin proxy that exposes the same fields as TrainConfig but with a
+    per-iter c_entropy override. Lets ppo_update stay pure (no mutation of
+    the user's TrainConfig)."""
+
+    def __init__(self, base: TrainConfig, c_entropy: float) -> None:
+        self._base = base
+        self._c_entropy = c_entropy
+
+    def __getattr__(self, name: str):
+        if name == "c_entropy":
+            return self._c_entropy
+        return getattr(self._base, name)
+
+
+def _adapt_c_entropy(cfg: TrainConfig, current: float, measured_entropy: float) -> float:
+    """Move c_entropy toward keeping policy entropy in [floor, ceiling].
+
+    If entropy < floor: bump c_entropy up so next iter pushes harder on
+    the entropy term. If entropy > ceiling: ease it back down. Stays put
+    inside the band. Clamped to [c_entropy_min, c_entropy_max] for
+    numerical safety.
+    """
+    if cfg.entropy_floor is None:
+        return current
+    if measured_entropy < cfg.entropy_floor:
+        current *= cfg.c_entropy_step
+    elif measured_entropy > cfg.entropy_ceiling:
+        current /= cfg.c_entropy_step
+    return max(cfg.c_entropy_min, min(cfg.c_entropy_max, current))
+
+
 def _resolve_device(name: str) -> torch.device:
     if name in ("auto",):
         if torch.backends.mps.is_available():
@@ -253,8 +411,21 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
     model = PolicyValueNet().to(device)
     optimiser = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
-    # Opponent pool starts with light baselines; snapshots are added later.
-    pool: list[object] = [RandomAgent(seed=1), GreedyAgent(seed=2)]
+    # Adaptive entropy coefficient — we let `cfg.c_entropy` be the starting
+    # point and scale it toward the floor/ceiling band each iter. (Held in
+    # a local var so the cfg object stays immutable for reproducibility.)
+    c_entropy = cfg.c_entropy
+
+    # Opponent pool starts with light baselines (anchors are exempt from
+    # eviction); snapshots get added every snapshot_every.
+    pool = OpponentPool(
+        max_size=cfg.max_pool_size,
+        p=cfg.pfsp_p,
+        min_weight=cfg.pfsp_min_weight,
+        window=cfg.pfsp_window,
+    )
+    pool.add(RandomAgent(seed=1), "random", is_anchor=True)
+    pool.add(GreedyAgent(seed=2), "greedy", is_anchor=True)
 
     save_dir = Path(cfg.save_dir) if cfg.save_dir else None
     if save_dir is not None:
@@ -269,26 +440,35 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
         all_records: list[StepRecord] = []
         n_wins = 0
         for _ in range(cfg.games_per_iter):
-            opp = random.choice(pool)
-            records, winner, seat = play_episode(model, opp, cfg, rng, device)
+            opp_member = pool.sample(rng)
+            records, winner, seat = play_episode(model, opp_member.agent, cfg, rng, device)
             compute_gae(records, gamma=cfg.gamma, lam=cfg.lam, last_value=0.0)
             all_records.extend(records)
-            if winner == seat:
+            trainee_won = winner == seat
+            pool.record(opp_member, trainee_won)
+            if trainee_won:
                 n_wins += 1
         rollout_wr = n_wins / max(1, cfg.games_per_iter)
         if not all_records:
             print(f"[iter {it}] no records, skipping update")
             continue
 
+        # Drive c_entropy toward the [floor, ceiling] band BEFORE the PPO
+        # update so the regulariser used this iter reflects what we want.
+        # The decision is based on the entropy we measured at the *end* of
+        # the previous iter (kept in stats); for the first iter we leave
+        # the configured start value alone.
+        cfg_for_update = _ConfigWithEntropy(cfg, c_entropy)
         batch = stack_batch(all_records, device)
-        stats = ppo_update(model, optimiser, batch, cfg, np_rng)
+        stats = ppo_update(model, optimiser, batch, cfg_for_update, np_rng)
+        c_entropy = _adapt_c_entropy(cfg, c_entropy, stats["entropy"])
         dt = time.perf_counter() - t0
 
         msg = (
             f"[iter {it:4d}] games={cfg.games_per_iter} trans={len(all_records)} "
             f"rollout_wr={rollout_wr:.2f} "
             f"pg={stats['pg_loss']:.3f} v={stats['v_loss']:.3f} "
-            f"ent={stats['entropy']:.3f} kl={stats['approx_kl']:.4f} "
+            f"ent={stats['entropy']:.3f} c_ent={c_entropy:.4f} kl={stats['approx_kl']:.4f} "
             f"stop@ep={stats['stopped_at_epoch']} dt={dt:.1f}s"
         )
         print(msg)
@@ -303,6 +483,7 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             "pg_loss": stats["pg_loss"],
             "v_loss": stats["v_loss"],
             "entropy": stats["entropy"],
+            "c_entropy": c_entropy,
             "approx_kl": stats["approx_kl"],
             "stopped_at_epoch": stats["stopped_at_epoch"],
             "dt": dt,
@@ -346,24 +527,24 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
                 record["snapshot_path"] = str(ckpt_path)
             if wr_random >= cfg.pool_threshold_wr_random:
                 frozen = copy.deepcopy(model).eval()
-                pool.append(NNAgent(frozen, device=device, stochastic=False))
-                # FIFO eviction of the oldest NN snapshot once we exceed the cap.
-                # Random + Greedy are always pool[0] / pool[1], so we drop the
-                # first NNAgent we find (i.e. pool[2] under current init).
-                evicted = False
-                if len(pool) > cfg.max_pool_size:
-                    for i, opp in enumerate(pool):
-                        if isinstance(opp, NNAgent):
-                            pool.pop(i)
-                            evicted = True
-                            break
+                evicted = pool.add(
+                    NNAgent(frozen, device=device, stochastic=False),
+                    name=f"iter_{it:05d}",
+                )
                 record["pool_grew"] = True
                 record["pool_size"] = len(pool)
                 print(
-                    f"[iter {it:4d}] added snapshot to opponent pool "
+                    f"[iter {it:4d}] added iter_{it:05d} to pool "
                     f"(wr_random={wr_random:.2f} ≥ {cfg.pool_threshold_wr_random}"
-                    f"{', evicted oldest NN snapshot' if evicted else ''})"
+                    f"{f', evicted {evicted}' if evicted else ''})"
                 )
+                # Periodic PFSP debug — show the per-opponent rolling WR so
+                # we can see which historical snapshots are currently
+                # giving the trainee trouble.
+                rows = pool.summary()
+                rows.sort(key=lambda t: t[1])  # worst (lowest WR) first
+                top = [f"{n}={wr:.2f}({k})" for n, wr, k in rows[:6]]
+                print(f"[iter {it:4d}] PFSP toughest: " + " · ".join(top))
             else:
                 print(
                     f"[iter {it:4d}] pool unchanged "
