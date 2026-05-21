@@ -77,6 +77,18 @@ export function computeLineValue(state: GameState, lineIdx: number, player: Play
 // Atomic mutations
 // ---------------------------------------------------------------------------
 
+/**
+ * Append an "info" entry to the engine event log. Used to make
+ * implicit/silent gameplay events visible to the client — e.g. an
+ * effect that tries to make the opponent discard but their hand is
+ * empty, or a draw that finds both deck and trash exhausted. The Codex
+ * (p.2) says card text resolves even when impossible, so the user
+ * never sees these as a discrete action; this log surfaces them.
+ */
+export function logInfo(state: GameState, text: string): void {
+  state.log.push({ kind: "info", turn: state.turn, text, timestamp: Date.now() });
+}
+
 // Per-atomic deferred event flags. Set by mutation helpers below; drained
 // by the engine after the current effect stack resolves (mirrors the
 // Python _drain_pending_after_events).
@@ -101,7 +113,11 @@ function flagFlip(state: GameState, card: CardInst): void {
 }
 
 export function drawCards(state: GameState, player: PlayerIndex, n: number): number {
-  if (playerCannotDraw(state, player)) return 0;
+  if (n <= 0) return 0;
+  if (playerCannotDraw(state, player)) {
+    logInfo(state, `P${player + 1} could not draw ${n} (Ice 6 is suppressing draws while hand has cards).`);
+    return 0;
+  }
   const ps = state.players[player];
   let drawn = 0;
   let shuffled = false;
@@ -121,6 +137,9 @@ export function drawCards(state: GameState, player: PlayerIndex, n: number): num
   }
   if (drawn > 0) flagAfterDraw(state, player);
   if (shuffled) flagAfterShuffle(state, player);
+  if (drawn < n) {
+    logInfo(state, `P${player + 1} drew ${drawn} of ${n} cards (deck + trash exhausted).`);
+  }
   return drawn;
 }
 

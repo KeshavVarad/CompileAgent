@@ -22,6 +22,7 @@ import {
   type FieldTarget,
   flipCard,
   lineStack,
+  logInfo,
   middleSuppressed,
   oppMustPlayFacedown,
   oppPlayBlockedInLine,
@@ -95,7 +96,11 @@ function* chooseFieldTarget(
 
 function* discardN(state: GameState, player: PlayerIndex, n: number): EffectGen {
   for (let i = 0; i < n; i++) {
-    if (state.players[player].hand.length === 0) return;
+    if (state.players[player].hand.length === 0) {
+      const remaining = n - i;
+      logInfo(state, `P${player + 1} skipped ${remaining} of ${n} forced discard(s) — hand empty.`);
+      return;
+    }
     const options = state.players[player].hand.map((_, idx) =>
       describeHandCard(state, player, idx),
     );

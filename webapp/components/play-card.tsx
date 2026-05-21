@@ -45,10 +45,18 @@ export function PlayCard({
 }: Props) {
   const knownIdentity = card.defId >= 0;
   const isBoardFaceDown = variant === "board" && !card.faceUp;
-  // Show the card back when the viewer can't see the identity. On the
-  // field that's "opp face-down" (hidden=true). In hand it's the
-  // record-mode placeholder (defId=-1).
-  const showAsBack = (hidden && isBoardFaceDown) || (!knownIdentity && variant !== "board");
+  // Any face-down card on the field renders as the solid back, on both
+  // sides of the field. The user's own face-down used to render as a
+  // regular card with a "face-down" header and empty tier rows, which
+  // looked inconsistent with the opponent's face-down (the FaceDownBack
+  // pattern). In play mode the user already knows what they put down;
+  // in record mode the recorder doesn't need to see their face-down's
+  // identity on the board to keep transcribing.
+  // Hand-card placeholders (defId=-1) still render as the back.
+  const showAsBack = isBoardFaceDown || (!knownIdentity && variant !== "board");
+  // `hidden` no longer affects rendering on its own — kept on the prop
+  // surface for backwards-compat with callers that pass it.
+  void hidden;
 
   if (showAsBack) {
     return <FaceDownBack variant={variant} onClick={onClick} disabled={disabled} selected={selected} className={className} />;

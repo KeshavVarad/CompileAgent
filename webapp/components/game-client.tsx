@@ -50,7 +50,7 @@ function delayFor(action: Action): number {
   return BOT_STEP_DELAY_MS;
 }
 
-type BotStep = { action: Action; label: string; view: GameView };
+type BotStep = { action: Action; label: string; view: GameView; events: string[] };
 
 export function GameClient({ gameId, initialView }: Props) {
   const [view, setView] = useState<GameView>(initialView);
@@ -63,6 +63,7 @@ export function GameClient({ gameId, initialView }: Props) {
   // surface on the status banner.
   const [botQueue, setBotQueue] = useState<BotStep[]>([]);
   const [botLastLabel, setBotLastLabel] = useState<string | null>(null);
+  const [botLastEvents, setBotLastEvents] = useState<string[]>([]);
   const animating = botQueue.length > 0;
 
   // Step through the queued bot snapshots one at a time, updating the
@@ -76,6 +77,7 @@ export function GameClient({ gameId, initialView }: Props) {
     const t = setTimeout(() => {
       setView(next.view);
       setBotLastLabel(next.label);
+      setBotLastEvents(next.events ?? []);
       setBotQueue(rest);
     }, wait);
     return () => clearTimeout(t);
@@ -85,7 +87,10 @@ export function GameClient({ gameId, initialView }: Props) {
   // the banner returns to a normal turn-status message.
   useEffect(() => {
     if (botQueue.length > 0 || botLastLabel === null) return;
-    const t = setTimeout(() => setBotLastLabel(null), 1400);
+    const t = setTimeout(() => {
+      setBotLastLabel(null);
+      setBotLastEvents([]);
+    }, 1400);
     return () => clearTimeout(t);
   }, [botQueue, botLastLabel]);
 
@@ -108,11 +113,17 @@ export function GameClient({ gameId, initialView }: Props) {
           }
           const data = await res.json();
           const postUser = (data.postUserView ?? data.view) as GameView;
+          const userEvents = (data.userEvents ?? []) as string[];
           const steps = (data.botSteps ?? []) as BotStep[];
           // Show the user's-action result immediately, then let the
-          // effect animate through the bot's chain.
+          // effect animate through the bot's chain. If the user's own
+          // action emitted info events (e.g. their card text tried to
+          // do something impossible), toast them so the player sees
+          // why the visual change didn't match expectations.
           setView(postUser);
+          for (const e of userEvents) toast.message(e);
           setBotLastLabel(null);
+          setBotLastEvents([]);
           setBotQueue(steps);
         } catch (e) {
           toast.error(e instanceof Error ? e.message : "Step failed");
@@ -226,6 +237,7 @@ export function GameClient({ gameId, initialView }: Props) {
             me={me}
             pending={pending}
             botActionLabel={botLastLabel}
+            botEvents={botLastEvents}
             animating={animating}
             queueRemaining={botQueue.length}
           />
@@ -947,12 +959,13 @@ function groupSelectionActions(actions: ActionView[]): { heading: string; action
 }
 
 function TurnStatusBanner({
-  view, me, pending, botActionLabel, animating, queueRemaining,
+  view, me, pending, botActionLabel, botEvents, animating, queueRemaining,
 }: {
   view: GameView;
   me: 0 | 1;
   pending: boolean;
   botActionLabel: string | null;
+  botEvents: string[];
   animating: boolean;
   queueRemaining: number;
 }) {
@@ -963,17 +976,29 @@ function TurnStatusBanner({
 
   // During bot-chain playback, surface what the opponent is doing right
   // now in big text — that's the whole point of the slow transitions.
+  // Any engine-emitted "info" events that landed during the step are
+  // shown beneath the label so the player sees skipped effects ("tried
+  // to discard but my hand was empty") inline with the action.
   if (animating && botActionLabel) {
     return (
       <Card className="my-3 border-amber-500/40">
-        <CardContent className="py-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="text-[10px] uppercase">{oppLabel}</Badge>
-            <span className="text-sm font-medium">{botActionLabel}</span>
+        <CardContent className="py-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary" className="text-[10px] uppercase">{oppLabel}</Badge>
+              <span className="text-sm font-medium">{botActionLabel}</span>
+            </div>
+            <span className="text-xs font-mono text-muted-foreground">
+              {queueRemaining > 0 ? `${queueRemaining} more step${queueRemaining === 1 ? "" : "s"}…` : "playing chain…"}
+            </span>
           </div>
-          <span className="text-xs font-mono text-muted-foreground">
-            {queueRemaining > 0 ? `${queueRemaining} more step${queueRemaining === 1 ? "" : "s"}…` : "playing chain…"}
-          </span>
+          {botEvents.length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-xs text-muted-foreground">
+              {botEvents.map((e, i) => (
+                <li key={i}>· {e}</li>
+              ))}
+            </ul>
+          )}
         </CardContent>
       </Card>
     );

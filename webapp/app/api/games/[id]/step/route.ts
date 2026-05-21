@@ -16,6 +16,21 @@ import { db, schema } from "@/lib/db";
 import { autoAdvanceBotWithSnapshots, botForStrategy, gameFromRow } from "@/lib/replay";
 import { type GameView, labelAction, viewOfGame } from "@/lib/view";
 
+// Pull "info" entries that the engine added between two log lengths.
+// The engine pushes one `kind:"action"` entry per step() plus zero or
+// more `kind:"info"` entries from inside effect resolution (e.g.
+// "P1 skipped 1 forced discard — hand empty"). We surface the info
+// entries so the client can render "tried X but couldn't" alongside
+// each animated bot step.
+function infoSlice(log: { kind: string; text?: string }[], from: number, to: number): string[] {
+  const out: string[] = [];
+  for (let i = from; i < to; i++) {
+    const e = log[i];
+    if (e && e.kind === "info" && typeof e.text === "string") out.push(e.text);
+  }
+  return out;
+}
+
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -36,7 +51,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (game.isOver()) return NextResponse.json({ error: "game already over" }, { status: 400 });
 
   // Apply the player's action.
+  const preUserLogLen = game.state.log.length;
   game.step(action);
+  const userEvents = infoSlice(game.state.log, preUserLogLen, game.state.log.length);
   // Snapshot the board the moment the user's action (and any same-step
   // effect resolution) finishes — before the bot starts moving. The
   // client renders this first so the player sees what their own action
@@ -49,19 +66,28 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   // straight to the final state.
   const bot0 = botForStrategy(row.bot0Strategy, row.seed + 1);
   const bot1 = botForStrategy(row.bot1Strategy, row.seed + 2);
-  type Step = { action: Action; label: string; view: GameView };
+  type Step = { action: Action; label: string; view: GameView; events: string[] };
   let botSteps: Step[] = [];
   if (bot0 || bot1) {
-    const { applied, snapshots } = await autoAdvanceBotWithSnapshots<string, Step>(
+    const { applied, snapshots } = await autoAdvanceBotWithSnapshots<
+      { label: string; preLogLen: number },
+      Step
+    >(
       game,
       bot0,
       bot1,
-      // Pre-step: label the action against the pre-step game state so
-      // card details (which leave the hand once the step lands) are
-      // captured in the label.
-      (g, a) => labelAction(g, a),
-      // Post-step: bundle the post-state view with the captured label.
-      (a, label, g) => ({ action: a, label, view: viewOfGame(g) }),
+      // Pre-step: label the action against the pre-step game state, and
+      // record the current log length so we can slice out info events
+      // that land during this step.
+      (g, a) => ({ label: labelAction(g, a), preLogLen: g.state.log.length }),
+      // Post-step: bundle the post-state view, the captured label, and
+      // the info-event delta.
+      (a, captured, g) => ({
+        action: a,
+        label: captured.label,
+        view: viewOfGame(g),
+        events: infoSlice(g.state.log, captured.preLogLen, g.state.log.length),
+      }),
     );
     newActions.push(...applied);
     botSteps = snapshots;
@@ -85,6 +111,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     // missing (e.g., a future client talking to an older server).
     view: viewOfGame(game),
     postUserView,
+    userEvents,
     botSteps,
   });
 }
