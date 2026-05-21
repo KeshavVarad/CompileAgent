@@ -33,16 +33,16 @@ export type BotDescriptor = {
 
 /** The bot currently selected as the "Play vs Bot" opponent. */
 export const CURRENT_BOT: BotDescriptor = {
-  id: "sparkv1",
-  displayLabel: "Sparkv1",
+  id: "sparkv2",
+  displayLabel: "Sparkv2",
   modelPath: "/models/bot-current.onnx",
-  sourceCheckpoint: "runs/20260520-224058/snapshot_00120.pt",
-  trainingRun: "20260520-224058",
-  trainingIter: 120,
+  sourceCheckpoint: "runs/20260521-040612-loose-policy/snapshot_00500.pt",
+  trainingRun: "20260521-040612-loose-policy",
+  trainingIter: 500,
   evalSummary: {
-    vsRandomWinRate: 0.80,
-    vsGreedyWinRate: 0.60,
-    elo: 1344,
+    vsRandomWinRate: 0.90,
+    vsGreedyWinRate: 0.70,
+    elo: 1609,
     gamesPerMatchup: 50,
   },
 };

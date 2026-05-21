@@ -75,6 +75,51 @@ class MCTSConfig:
     # during simulation, we don't expand it — we just take the policy
     # argmax to keep the simulator moving.
     simulate_choice_with_argmax: bool = True
+    # Dirichlet noise at root only (AlphaZero technique). Without this,
+    # a peaked policy (avg top_prob ≈ 0.95) saturates PUCT — no realistic
+    # c_puct overcomes a 1000× prior ratio between top and tail actions.
+    # The mix `(1-eps)*p + eps*Dir(alpha)` forces some visits onto
+    # non-policy actions regardless of how confident the policy is.
+    # Set eps=0 to disable (default — preserves the original behavior).
+    # AZ used eps=0.25, alpha=0.3 (chess) / 0.03 (Go). Compile's branching
+    # factor (~16 legal actions/move) is closer to chess than Go.
+    dirichlet_eps: float = 0.0
+    dirichlet_alpha: float = 0.3
+    # Root top-k pruning. When > 0, after the root expands we keep only
+    # the `k` actions with the highest policy priors and flatten those
+    # priors to uniform 1/k. The tail (low-prior actions) gets zero
+    # sims. Combined with `root_min_visits_per_action`, this implements
+    # "trust the policy enough to ignore the tail, but give every top-k
+    # action a fair share of sims so the value head can pick the best
+    # one." Set to 0 to disable.
+    root_top_k: int = 0
+    # Root round-robin guarantee. When > 0, the first
+    # `len(untried_actions) * root_min_visits_per_action` sims at the
+    # root MUST round-robin across every untried action — PUCT only
+    # takes over after each action has been visited that many times.
+    # Fixes the bug where a peaked policy + non-zero Q on the first sim
+    # locks PUCT onto the top action forever.
+    root_min_visits_per_action: int = 0
+    # Leaf batching for forward-pass throughput. When > 1, the search
+    # collects up to `batch_size` sims' leaves before doing one batched
+    # network forward pass — amortizing per-call MPS dispatch overhead
+    # across the batch. Virtual loss is applied along each in-flight
+    # path during collection so subsequent sims in the batch don't all
+    # collapse onto the same trajectory. batch_size=1 reproduces the
+    # original one-sim-at-a-time behavior.
+    batch_size: int = 1
+    # Virtual loss magnitude applied during batched collection (and
+    # reverted before real-value backprop). Sign is uniform across the
+    # path; in two-player play the negamax-correct sign would alternate
+    # by decider, but for small batch sizes the diversification effect
+    # is dominated by root-level visits where the sign is correct anyway.
+    virtual_loss: float = 1.0
+    # Skip search entirely when policy top_prob >= this threshold.
+    # The diagnostic shows zero disagreements between MCTS and policy
+    # argmax in the top_prob > 0.9 bucket across hundreds of decisions,
+    # so search is pure compute waste on confident states. Set to 0.0
+    # to disable; 0.9 is a safe choice given the observed structure.
+    skip_search_top_prob: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +310,28 @@ def _value_only(
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _LeafResult:
+    """One sim's trajectory result, ready for (batched) evaluation + backprop.
+
+    `mode` discriminates how the caller should finalize:
+      - "terminal":   leaf is game-over; `terminal_value` is the perspective-POV
+                      reward (+1/-1/0). No network call needed.
+      - "expand":     leaf is unexplored; needs policy+value to seed priors and
+                      back up a value estimate.
+      - "mid_effect": leaf is mid-effect (CHOOSE_TARGET); we don't expand it,
+                      we just need its value (the policy-argmax move from here
+                      is what subsequent sims will simulate).
+      - "failed":     the engine refused the action during expansion. Caller
+                      backs up 0; virtual loss should NOT have been applied.
+    """
+    path: list[tuple["_Node", int]]
+    leaf: Optional["_Node"]
+    mode: str
+    legal: list[Action]
+    terminal_value: float
+
+
 class MCTSAgent:
     """Drop-in Agent for the eval pipeline (and training, if desired).
 
@@ -284,6 +351,10 @@ class MCTSAgent:
         self.device = torch.device(device)
         self.cfg = cfg or MCTSConfig()
         self.rng = random.Random(seed)
+        # Separate numpy RNG used only for Dirichlet draws so the
+        # determinization sampling (above, via `random.Random`) stays bit-
+        # identical when noise is disabled.
+        self.np_rng = np.random.default_rng(seed)
 
     def choose(self, game: Game, legal: list[Action]) -> Action:
         if not legal:
@@ -296,6 +367,18 @@ class MCTSAgent:
         if _mid_effect(game):
             probs, _ = _policy_and_value(self.model, game, legal, self.device)
             return legal[int(np.argmax(probs[: len(legal)]))]
+
+        # Skip-when-confident: if the policy is already very sure of one
+        # move, search has no upside and just burns compute. Diagnostic
+        # data shows zero MCTS/policy disagreements on top_prob > 0.9
+        # decisions, so this is essentially free WR with a ~10% wall-clock
+        # win on Greedy matchups.
+        if self.cfg.skip_search_top_prob > 0.0:
+            probs, _ = _policy_and_value(self.model, game, legal, self.device)
+            n = min(len(legal), len(probs))
+            top_prob = float(probs[:n].max()) if n > 0 else 0.0
+            if top_prob >= self.cfg.skip_search_top_prob:
+                return legal[int(np.argmax(probs[:n]))]
 
         perspective = game.decider()
 
@@ -316,14 +399,18 @@ class MCTSAgent:
             # (rare; happens only when hidden info affected legality,
             # which Compile doesn't normally do at top-level decisions).
             self._expand(root, root_legal)
-            for _ in range(self.cfg.sims_per_determinization):
-                self._simulate(root, perspective, depth=0)
-            # Roll up visits from root children
-            for idx, child in root.children.items():
-                # Map by position in det_legal → original legal.
-                # When the lists match exactly, idx == idx in legal.
-                if 0 <= idx < len(total_visits):
-                    total_visits[idx] += child.n_visits
+            self._apply_root_top_k(root)
+            self._apply_root_noise(root)
+            self._search(root, perspective)
+            # Roll up visits from root children. With root_top_k pruning,
+            # the child index points into the pruned `untried_actions`,
+            # not the original `legal`; map back via action equality.
+            for child in root.children.values():
+                try:
+                    orig_idx = legal.index(child.action_from_parent)
+                except ValueError:
+                    continue
+                total_visits[orig_idx] += child.n_visits
 
         best_idx = int(np.argmax(total_visits))
         return legal[best_idx]
@@ -345,9 +432,62 @@ class MCTSAgent:
         node._priors = probs
         return value
 
+    def _apply_root_noise(self, root: _Node) -> None:
+        """Mix Dirichlet noise into the root priors (AlphaZero technique).
+        Off by default — only fires when cfg.dirichlet_eps > 0. Applied
+        per-determinization, so each independent search gets its own
+        noise draw."""
+        eps = self.cfg.dirichlet_eps
+        if eps <= 0 or root._priors is None:
+            return
+        n = len(root._priors)
+        if n <= 1:
+            return
+        noise = self.np_rng.dirichlet([self.cfg.dirichlet_alpha] * n)
+        root._priors = (1.0 - eps) * root._priors + eps * noise.astype(root._priors.dtype)
+
+    def _apply_root_top_k(self, root: _Node) -> None:
+        """Prune root's untried_actions to the top-k by policy prior and
+        flatten the kept priors to uniform 1/k. No-op when cfg.root_top_k
+        is 0 or already covers everything. Must be called BEFORE any
+        simulation runs so children are still empty."""
+        k = self.cfg.root_top_k
+        if k <= 0 or root._priors is None:
+            return
+        n = len(root.untried_actions)
+        if k >= n:
+            return
+        order = np.argsort(-root._priors[:n])[:k]
+        order_sorted = sorted(int(i) for i in order)
+        kept_actions = [root.untried_actions[i] for i in order_sorted]
+        root.untried_actions = kept_actions
+        root._priors = np.full(len(kept_actions), 1.0 / len(kept_actions),
+                               dtype=root._priors.dtype)
+
     def _select_child(self, node: _Node, perspective: int) -> tuple[int, Action]:
-        """PUCT selection. Returns (child_index_into_legal, action)."""
-        # Sum visits across all children of `node`.
+        """PUCT selection. Returns (child_index_into_untried, action).
+
+        Root-only round-robin guarantee: if `cfg.root_min_visits_per_action`
+        is set and any root child has fewer than that many visits, pick
+        it instead of running PUCT. Once every root action has cleared
+        the floor, fall through to standard PUCT for the remainder of
+        the sim budget.
+        """
+        # Round-robin floor at the root. `node.parent is None` is the
+        # root in this design (every search rebuilds its tree from a
+        # fresh root).
+        if (
+            node.parent is None
+            and self.cfg.root_min_visits_per_action > 0
+            and node.untried_actions
+        ):
+            floor = self.cfg.root_min_visits_per_action
+            for i, action in enumerate(node.untried_actions):
+                child = node.children.get(i)
+                n_i = child.n_visits if child else 0
+                if n_i < floor:
+                    return i, action
+
         total_n = max(1, node.n_visits)
         priors = node._priors
 
@@ -374,12 +514,70 @@ class MCTSAgent:
                 best_idx = i
         return best_idx, node.untried_actions[best_idx]
 
-    def _simulate(self, root: _Node, perspective: int, depth: int) -> float:
-        """One PUCT trajectory from root → leaf. Returns the leaf value
-        (relative to the perspective player, +1 = perspective wins)."""
+    def _search(self, root: _Node, perspective: int) -> None:
+        """Run `cfg.sims_per_determinization` PUCT trajectories from root.
+
+        Batches up to `cfg.batch_size` leaves' network evaluations into
+        a single forward pass. Virtual loss is applied along each path
+        during the batch so subsequent sims see those edges as visited
+        and explore elsewhere; it's reverted before real-value backprop
+        so the final tree statistics are correct.
+
+        batch_size=1 reproduces the serial one-sim-at-a-time path.
+        """
+        sims_remaining = self.cfg.sims_per_determinization
+        batch_size = max(1, self.cfg.batch_size)
+        while sims_remaining > 0:
+            n_this = min(batch_size, sims_remaining)
+            pending: list[_LeafResult] = []
+            # Phase 1: walk K trajectories to their leaves, applying
+            # virtual loss as we go so the batch fans out.
+            for _ in range(n_this):
+                leaf = self._select_to_leaf(root, perspective)
+                if leaf.mode == "failed":
+                    # Engine refused the action; back up zero and move on.
+                    # No virtual loss was applied for failed leaves.
+                    self._backprop(leaf.path, 0.0, perspective)
+                    sims_remaining -= 1
+                    continue
+                self._apply_virtual_loss(leaf.path)
+                pending.append(leaf)
+                sims_remaining -= 1
+
+            # Phase 2: batched network eval for leaves needing it.
+            needs_net = [l for l in pending if l.mode in ("expand", "mid_effect")]
+            net_results: dict[int, tuple[np.ndarray, float]] = {}
+            if needs_net:
+                results = self._batched_policy_and_value(needs_net)
+                for i, r in zip([id(l) for l in needs_net], results):
+                    net_results[i] = r
+
+            # Phase 3: revert virtual loss + real backprop for each leaf.
+            for leaf in pending:
+                self._revert_virtual_loss(leaf.path)
+                if leaf.mode == "terminal":
+                    value = leaf.terminal_value  # already in perspective POV
+                else:
+                    priors, raw_value = net_results[id(leaf)]
+                    if leaf.mode == "expand":
+                        leaf.leaf.untried_actions = list(leaf.legal)
+                        leaf.leaf._priors = priors
+                    # Network value is from the leaf's current decider's
+                    # POV; convert to perspective POV.
+                    if leaf.leaf.game.decider() != perspective:
+                        value = -raw_value
+                    else:
+                        value = raw_value
+                self._backprop(leaf.path, value, perspective)
+
+    def _select_to_leaf(self, root: _Node, perspective: int) -> "_LeafResult":
+        """Walk from root via PUCT until reaching a leaf needing
+        evaluation. Returns a _LeafResult describing what kind of
+        evaluation the leaf needs, so the caller can either batch it
+        with siblings or finalize immediately."""
         node = root
-        path: list[tuple[_Node, int]] = []  # (parent, child_idx_in_parent)
-        # Selection
+        path: list[tuple[_Node, int]] = []
+        depth = 0
         while node.is_expanded() and not node.is_terminal and depth < self.cfg.max_depth:
             if not node.untried_actions:
                 break
@@ -390,23 +588,18 @@ class MCTSAgent:
                 node = existing
                 depth += 1
                 continue
-            # Need to expand this child. Apply action to a fresh clone,
-            # then drain any in-flight effect choices with policy argmax
-            # so the resulting state is back at a top-level decision
-            # point (deep-copyable for the next sim step).
+            # Expand a new child: apply action on a clone, drain any
+            # in-flight effect choices to a top-level decision point.
             child_game = copy.deepcopy(node.game)
             try:
                 child_game.step(action)
                 self._drain_mid_effect(child_game)
             except Exception:
-                # Engine refused the action; mark this branch unproductive.
-                # Should be rare — if it happens, the determinization
-                # produced an inconsistent state. We back off to value 0.
-                value = 0.0
-                # Don't add the child; just back the prior up.
-                self._backprop(path, value, perspective)
-                return value
-            # Drive engine to next decision-or-terminal.
+                # Determinization produced an inconsistent state — engine
+                # refused the action. Caller backs up zero with no virtual
+                # loss applied.
+                return _LeafResult(path=path, leaf=None, mode="failed",
+                                    legal=[], terminal_value=0.0)
             prior = 0.0
             if node._priors is not None and child_idx < len(node._priors):
                 prior = float(node._priors[child_idx])
@@ -419,40 +612,107 @@ class MCTSAgent:
             node.children[child_idx] = child_node
             node = child_node
             depth += 1
-            break  # leave the selection loop to expand below
+            break
 
-        # Evaluation
         if node.is_terminal:
-            # Terminal: known reward.
             w = node.game.state.winner
             if w is None:
-                value = 0.0
+                tv = 0.0
             elif w == perspective:
-                value = 1.0
+                tv = 1.0
             else:
-                value = -1.0
-        else:
-            legal = node.game.legal_actions()
-            if not legal:
-                node.is_terminal = True
-                value = 0.0
-            elif _mid_effect(node.game) and self.cfg.simulate_choice_with_argmax:
-                # Don't expand mid-effect; advance the simulator with
-                # policy argmax and re-evaluate.
-                probs, value = _policy_and_value(self.model, node.game, legal, self.device)
-                # Use value of this state (the policy-argmax move is
-                # already "expected" under the network's belief).
-            else:
-                value = self._expand(node, legal)
+                tv = -1.0
+            return _LeafResult(path=path, leaf=node, mode="terminal",
+                                legal=[], terminal_value=tv)
 
-        # Value above is from the node's current decider's POV. Convert
-        # to perspective POV (positive = good for the root's perspective
-        # player).
-        if node.game.decider() != perspective:
-            value = -value
+        legal = node.game.legal_actions()
+        if not legal:
+            node.is_terminal = True
+            return _LeafResult(path=path, leaf=node, mode="terminal",
+                                legal=[], terminal_value=0.0)
+        if _mid_effect(node.game) and self.cfg.simulate_choice_with_argmax:
+            return _LeafResult(path=path, leaf=node, mode="mid_effect",
+                                legal=legal, terminal_value=0.0)
+        return _LeafResult(path=path, leaf=node, mode="expand",
+                            legal=legal, terminal_value=0.0)
 
-        self._backprop(path, value, perspective)
-        return value
+    def _batched_policy_and_value(
+        self, leaves: list["_LeafResult"],
+    ) -> list[tuple[np.ndarray, float]]:
+        """Stack K leaves' state+action encodings into one forward pass.
+        Returns list of (priors_over_leaf_legal, value) per leaf.
+
+        Each leaf's `legal` length can differ, but `encode_actions` pads
+        all of them to MAX_ACTIONS=32 so we can stack along dim 0 directly.
+        Priors are returned renormalized over the leaf's legal prefix.
+        """
+        # Encode all leaves serially (cheap numpy work). The expensive
+        # part is the single batched torch forward below.
+        state_dicts = []
+        raws, cards, protos, masks, n_legals = [], [], [], [], []
+        for l in leaves:
+            persp = l.leaf.game.decider()
+            s = encode_state(l.leaf.game, persp)
+            raw, card_ids, proto_ids, mask = encode_actions(l.leaf.game, l.legal, persp)
+            state_dicts.append(s)
+            raws.append(raw)
+            cards.append(card_ids)
+            protos.append(proto_ids)
+            masks.append(mask)
+            n_legals.append(len(l.legal))
+        # Stack into [B, ...] tensors.
+        keys = list(state_dicts[0].keys())
+        batched_state = {
+            k: torch.from_numpy(np.stack([sd[k] for sd in state_dicts])).to(self.device)
+            for k in keys
+        }
+        ar = torch.from_numpy(np.stack(raws)).to(self.device)
+        ac = torch.from_numpy(np.stack(cards)).to(self.device)
+        ap = torch.from_numpy(np.stack(protos)).to(self.device)
+        am = torch.from_numpy(np.stack(masks)).to(self.device)
+        with torch.no_grad():
+            logits, values = self.model(batched_state, ar, ac, ap, am)
+        logits_np = logits.detach().cpu().numpy()  # [B, MAX_ACTIONS]
+        values_np = values.detach().cpu().numpy()  # [B]
+        out: list[tuple[np.ndarray, float]] = []
+        for i, n_legal in enumerate(n_legals):
+            n = min(n_legal, logits_np.shape[1])
+            sub = logits_np[i, :n]
+            sub = sub - sub.max()
+            expd = np.exp(sub)
+            probs = expd / max(1e-9, expd.sum())
+            out.append((probs, float(values_np[i])))
+        return out
+
+    def _apply_virtual_loss(self, path: list[tuple[_Node, int]]) -> None:
+        """Temporarily make this path look less attractive to subsequent
+        sims in the same batch. Sign is uniform across the path — the
+        negamax-correct version alternates by decider, but at small batch
+        sizes the root-level diversification (where the sign is correct
+        anyway) dominates. Reverted by `_revert_virtual_loss` before real
+        backprop."""
+        loss = self.cfg.virtual_loss
+        if not path:
+            return
+        path[0][0].n_visits += 1
+        path[0][0].total_value -= loss
+        for parent, child_idx in path:
+            child = parent.children.get(child_idx)
+            if child is not None:
+                child.n_visits += 1
+                child.total_value -= loss
+
+    def _revert_virtual_loss(self, path: list[tuple[_Node, int]]) -> None:
+        loss = self.cfg.virtual_loss
+        if not path:
+            return
+        path[0][0].n_visits -= 1
+        path[0][0].total_value += loss
+        for parent, child_idx in path:
+            child = parent.children.get(child_idx)
+            if child is not None:
+                child.n_visits -= 1
+                child.total_value += loss
 
     def _drain_mid_effect(self, game: Game, max_steps: int = 64) -> None:
         """Advance the engine past any in-flight effect choices using
