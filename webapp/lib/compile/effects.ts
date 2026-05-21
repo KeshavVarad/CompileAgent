@@ -329,29 +329,37 @@ register(MIDDLE_EFFECTS, "AX01:Love:6", function* (state, ap) {
 
 register(MIDDLE_EFFECTS, "MN01:Darkness:0", function* (state, ap) {
   drawCards(state, ap, 3);
-  // Shift 1 of opponent's covered cards.
+  // "Shift 1 of your opponent's covered cards." Default rule on shift
+  // is uncovered-only; Darkness 0 explicitly overrides via the
+  // "covered" keyword, so we enumerate only cards beneath the top of
+  // each opp stack (pos < length - 1 = covered) and exclude any cards
+  // mid-commit.
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const targets: FieldTarget[] = [];
   for (let li = 0; li < NUM_LINES; li++) {
     const stack = lineStack(state.lines[li], opp);
     for (let pos = 0; pos < stack.length - 1; pos++) {
-      targets.push({ line: li, player: opp, pos, card: stack[pos] });
+      const c = stack[pos];
+      if (c.isCommitted) continue;
+      targets.push({ line: li, player: opp, pos, card: c });
     }
   }
   yield* chooseFieldTarget("Shift 1 of opponent's covered cards", targets, state, ap);
   const i = state.scratch["_last_target_idx"] as number | undefined;
   if (i == null || !targets[i]) return;
-  const lineOpts = [0, 1, 2].map((n) => String(n));
-  const lineTargets = [0, 1, 2];
+  const src = targets[i];
+  // Codex p.4: a shift must be to a DIFFERENT line on the same side.
+  // Exclude the source line from the destination prompt.
+  const destLines = [0, 1, 2].filter((l) => l !== src.line);
   const dstIdx: number = yield {
     prompt: "To which line?",
-    options: lineOpts,
-    targets: lineTargets,
+    options: destLines.map((l) => `L${l + 1}`),
+    targets: destLines,
     optional: false,
     decider: ap,
   };
-  if (dstIdx < 0 || dstIdx > 2) return;
-  shiftCard(state, targets[i].line, targets[i].player, targets[i].pos, dstIdx);
+  if (destLines[dstIdx] == null) return;
+  shiftCard(state, src.line, src.player, src.pos, destLines[dstIdx]);
 });
 
 register(MIDDLE_EFFECTS, "MN01:Darkness:1", function* (state, ap) {

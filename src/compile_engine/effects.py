@@ -1266,22 +1266,34 @@ def _love_6(state, ap, li, card):
 @middle("MN01:Darkness:0")
 def _darkness_0(state, ap, li, card):
     draw_cards(state, ap, 3)
-    # Shift 1 of opponent's covered cards.
+    # "Shift 1 of your opponent's covered cards." The "covered" keyword
+    # is an explicit override of the default "uncovered only" rule on
+    # shift effects (Codex p.3) — we enumerate strictly cards beneath
+    # the top of each opp stack and skip any mid-commit.
     opp = 1 - ap
     targets = []
     for ln in range(NUM_LINES):
         s = state.lines[ln].stack(opp)
         for pos in range(len(s) - 1):
-            targets.append((ln, opp, pos, s[pos]))
+            c = s[pos]
+            if c.is_committed:
+                continue
+            targets.append((ln, opp, pos, c))
     if not targets:
         return
     opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Shift 1 of opponent's covered cards",
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
-    dst_idx = yield Choice(prompt="To which line?", options=[str(i) for i in range(NUM_LINES)],
-                            targets=list(range(NUM_LINES)), decider=ap)
-    shift_card(state, sln, spl, spos, dst_idx)
+    # Codex p.4: shift must be to a DIFFERENT line on the same side.
+    dest_lines = [i for i in range(NUM_LINES) if i != sln]
+    dst_idx = yield Choice(
+        prompt="To which line?",
+        options=[f"L{i + 1}" for i in dest_lines],
+        targets=dest_lines, decider=ap,
+    )
+    dest = dest_lines[dst_idx]
+    shift_card(state, sln, spl, spos, dest)
 
 
 @middle("MN01:Darkness:1")
