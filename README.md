@@ -52,11 +52,86 @@ minus opponent's at game end). The plateau against Greedy at iter
 
 ![ladder](docs/figures/ladder.png)
 
-All-pairs round-robin between 9 snapshots + the two anchors (Random at
+All-pairs round-robin between 11 snapshots + the two anchors (Random at
 Elo 1000, Greedy at 1200). Elo computed from 12 games per ordered pair
-(24 per unordered pair). Iter 90 wins the headline Elo, but iter 120
-beats it head-to-head 63/100 — see
-[docs/model-card-sparkv1.md](docs/model-card-sparkv1.md) for the rationale.
+(24 per unordered pair, 1,872 games total). Iter 260 currently leads
+overall Elo at 1481; Sparkv1 (iter 120) is mid-pack on Elo but is the
+checkpoint most robust to the Greedy baseline. See
+[docs/model-card-sparkv1.md](docs/model-card-sparkv1.md) for the
+rationale on shipping iter 120 rather than the headline Elo winner.
+
+## Strategy analysis
+
+The Elo ranking compresses a lot of structure. The deeper analysis —
+which protocols the agent prefers, conditional win rates, protocol
+matchup imbalances, and non-transitive cycles between snapshots — lives
+in [docs/strategy-analysis.md](docs/strategy-analysis.md). Highlights:
+
+**Draft identity moves through three phases.** Iter 10 has diffuse picks
+(Darkness/Spirit/Fire/Speed each ~25–45%). Iter 30 latches onto Psychic
+(60%). By iter 60–150 the bot settles into a **Darkness + Plague** core.
+From iter 170 onward it pivots to **Darkness + Fire + Plague**. Darkness
+is drafted in ~60% of games from iter 90 all the way to iter 260 — the
+single most stable feature of the policy.
+
+![protocol-preferences](docs/figures/protocol-preferences.png)
+
+**Protocol strength, conditional on being drafted** (n ≥ 20 games):
+
+| protocol | WR | n drafted |
+|---|---|---|
+| Plague | 0.70 | 477 |
+| Love | 0.69 | 166 |
+| Speed | 0.66 | 205 |
+| Darkness | 0.65 | 601 |
+| Fire | 0.65 | 412 |
+
+Plague + Darkness + Fire are the top 3 picks _and_ the top 3 protocols
+by raw win rate — strong evidence the policy converged on objectively
+good draft picks rather than getting attached to a quirky niche.
+
+**Protocol-vs-protocol matchups** are sharply imbalanced. Best 5 lines
+for the agent (with row = agent protocol, col = opp protocol, n ≥ 30):
+
+| my proto | opp proto | WR | n |
+|---|---|---|---|
+| Life | Metal | 0.84 | 37 |
+| Psychic | Metal | 0.82 | 38 |
+| Fire | Ice | 0.82 | 38 |
+| Darkness | Ice | 0.80 | 44 |
+| Love | Metal | 0.79 | 57 |
+
+Worst 5 (where humans should aim if they want to beat the bot):
+
+| my proto | opp proto | WR | n |
+|---|---|---|---|
+| Spirit | Life | 0.25 | 63 |
+| Spirit | Speed | 0.29 | 49 |
+| Water | Light | 0.30 | 44 |
+| Metal | Fire | 0.31 | 45 |
+| Metal | Life | 0.33 | 60 |
+
+Two patterns stand out: the agent dominates opponent Metal lines (5/5
+of the top-5 best matchups feature opp Metal) and gets eaten by opp
+Life (3/5 worst matchups). Spirit-into-anything is also weak — Spirit
+contains the agent's lowest-WR drafts.
+
+![protocol-matchup](docs/figures/protocol-matchup.png)
+
+**Rock-paper-scissors between snapshots.** Cycle detection on the
+ladder (≥55% WR threshold) found a real triad:
+
+> **snapshot_00260** beats **snapshot_00230** (58%) · **snapshot_00230**
+> beats **snapshot_00060** (62%) · **snapshot_00060** beats
+> **snapshot_00260** (58%).
+
+The strongest current snapshot loses to a much-earlier checkpoint
+because iter 60's draft profile (Plague-heavy, no Darkness +
+Fire combo) happens to counter iter 260's specialization. This is
+genuine non-transitivity — Elo flattens it into a linear ordering, but
+the head-to-head matrix below shows the cyclic structure directly.
+
+![rps-cycles](docs/figures/rps-cycles.png)
 
 ---
 
