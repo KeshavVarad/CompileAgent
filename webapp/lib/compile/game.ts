@@ -135,7 +135,15 @@ export class Game {
       const top = this.pending[this.pending.length - 1];
       if (top.lastChoice) return top.lastChoice.decider;
     }
-    return this.state.currentPlayer;
+    // During DRAFT, `currentPlayer` is fixed at 0 — the actual picker
+    // comes from the schedule. Return it so `autoAdvanceBot` invokes the
+    // right bot for each pick (otherwise the human is asked to draft
+    // for the bot too).
+    const st = this.state;
+    if (st.phase === "DRAFT" && st.draftIdx < st.draftSchedule.length) {
+      return st.draftSchedule[st.draftIdx] as PlayerIndex;
+    }
+    return st.currentPlayer;
   }
 
   legalActions(): Action[] {

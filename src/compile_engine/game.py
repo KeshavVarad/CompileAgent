@@ -162,7 +162,16 @@ class Game:
             top = self._pending[-1]
             if top.last_choice is not None:
                 return top.last_choice.decider
-        return self.state.current_player
+        # During DRAFT, `current_player` stays at 0 — the actual picker
+        # comes from the schedule. Surface it so per-seat agent callers
+        # (and the webapp's UI gate) hit the right seat for each pick.
+        st = self.state
+        if (
+            st.phase is Phase.DRAFT
+            and self._draft_idx < len(self._draft_schedule)
+        ):
+            return self._draft_schedule[self._draft_idx]
+        return st.current_player
 
     # ---------------------------------------------------------------- legality
 
