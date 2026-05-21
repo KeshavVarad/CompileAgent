@@ -366,35 +366,36 @@ class Game:
 
     def _drive(self) -> None:
         """Advance through auto-phases, trigger queue, and effect resumption
-        until a real decision point is reached (or game ends). Phase steps
-        that push effects (start/end triggers, after_clear_cache broadcasts)
-        must be drained before advancing further, so each phase iteration
-        re-runs the drain."""
-        st = self.state
+        until a real decision point is reached (or game ends).
 
-        # Drain effects, then any deferred "after X" broadcasts, then drain
-        # again. Loop until everything stabilises (or a decision is needed).
+        Single big loop that alternates drain → phase-step → drain. The
+        earlier two-loop layout had a deadlock: `_do_start_phase`/
+        `_do_end_phase` push effects onto `_pending` and the old code
+        returned to the caller. If every pushed effect resolved trivially
+        (no yield, no choice), those effects would never get drained
+        until the next `step()` — but `step()` doesn't fire until the
+        user submits an action, and the user has no action to submit
+        because phase is mid-START. Looping back to drain after each
+        phase push lets trivial effects clear in place and only yields
+        to the caller when a real decision actually surfaces.
+        """
+        st = self.state
         while True:
             if self._drain_pending():
                 return
-            if not self._drain_pending_after_events():
-                break
-
-        # Advance phases.
-        while True:
+            if self._drain_pending_after_events():
+                continue
+            # Phase advancement: one step per iteration, then back to drain.
             if st.phase is Phase.GAME_OVER:
                 return
             if st.phase is Phase.DRAFT:
                 if self._predetermined_picks is not None:
                     self._apply_predetermined_picks()
-                # else: caller picks via DRAFT_PROTOCOL actions
-                if st.phase is Phase.DRAFT:  # not yet finalized
+                if st.phase is Phase.DRAFT:
                     return
                 continue
-
             if st.phase is Phase.START:
-                if self._do_start_phase():
-                    return  # start-effect needs a decision
+                self._do_start_phase()
                 continue
             if st.phase is Phase.CHECK_CONTROL:
                 self._do_check_control()
@@ -402,43 +403,31 @@ class Game:
             if st.phase is Phase.CHECK_COMPILE:
                 forced = self._compileable_lines(st.current_player)
                 if forced:
-                    return  # need player to pick which (usually 1)
+                    return
                 st.phase = Phase.ACTION
                 continue
             if st.phase is Phase.ACTION:
-                return  # need a player action
+                return
             if st.phase is Phase.CHECK_CACHE:
                 ps = st.players[st.current_player]
-                # Spirit 0 bottom: skip check cache while uncovered. No
-                # Clear Cache action occurred → no after_clear_cache.
                 if player_skips_check_cache(st, st.current_player):
                     st.phase = Phase.END
                     continue
                 if len(ps.hand) <= HAND_SIZE_LIMIT:
-                    # Cache phase complete. If we discarded at least once
-                    # this phase, fire `After you clear cache:` triggers
-                    # (Codex p.6: "after" commands fire when the triggering
-                    # effect and its consequences are fully resolved).
                     ap = st.current_player
                     flag_key = f"_pending_after_clear_cache_p{ap}"
                     if st.scratch.pop(flag_key, False):
                         self._broadcast_after_clear_cache(ap)
-                        # Drain the broadcast effects before advancing to
-                        # END. If a choice is needed, return — drain
-                        # resumes on the next step.
-                        if self._drain_pending():
-                            return
                     st.phase = Phase.END
                     continue
-                return  # need DISCARD_CARD
+                return
             if st.phase is Phase.END:
-                if self._do_end_phase():
-                    return  # end-effect needs a decision
+                self._do_end_phase()
                 continue
             if st.phase is Phase.RESOLVING_EFFECT:
-                # Should not happen here; we drained pending above.
                 st.phase = Phase.ACTION
                 continue
+            return  # unreachable
 
     # ------------------------------------------------------------------ draft
 

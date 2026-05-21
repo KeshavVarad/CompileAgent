@@ -580,10 +580,13 @@ def test_fire_0_when_covered_triggers_on_play_atop():
     )
 
 
-def test_life_0_fires_at_end_only():
-    """Life 0 errata: 'End: If this card is covered, delete this card.' Cover
-    a face-up Life 0 — it should NOT delete on the cover event itself, only
-    at the End phase of its owner's next turn."""
+def test_life_0_self_deletes_at_end_when_covered():
+    """Life 0 errata: 'End: If this card is covered, delete this card.'
+    Covering Life 0 doesn't trigger the delete on the cover event itself;
+    the trigger fires when the END phase rolls over Life 0's owner's
+    visible-at-start commands. The play action advances through
+    CHECK_CACHE → END, so by the time control returns to the caller,
+    Life 0's End: trigger has fired and it's in trash."""
     from compile_engine import Game, GameConfig
     from compile_engine.actions import Action, ActionType
     from compile_engine.cards import load_card_defs
@@ -612,15 +615,19 @@ def test_life_0_fires_at_end_only():
     g.state.phase = Phase.ACTION
     g.state.scratch["_engine"] = g
     g._pending = []
-    # Play fd_card face-down into line 0 (covers Life 0).
+    # Play fd_card face-down into line 0 (covers Life 0). The action
+    # advances through CHECK_CACHE → END; Life 0's End trigger fires
+    # because the card is covered at End-phase start.
     g.step(Action(type=ActionType.PLAY_FACE_DOWN, hand_index=0, line_index=0))
-    # After play resolves, drain to the next decision point.
+    # Drain any prompts.
     while g._pending and g._pending[-1].last_choice is not None:
-        legal = g.legal_actions()
-        g.step(legal[0])
-    # Life 0 should STILL be in line 0 (not yet deleted — only fires at End).
-    assert life_0_inst in g.state.lines[0].p0_stack, (
-        "Life 0 should remain in field after being covered (errata: only at End)"
+        g.step(g.legal_actions()[0])
+    # Life 0 left line 0 (deleted by its own End trigger) and is now in trash.
+    assert life_0_inst not in g.state.lines[0].p0_stack, (
+        "Life 0 should self-delete at End when covered (Codex errata)"
+    )
+    assert life_0_inst in g.state.players[0].trash, (
+        "Life 0 should land in its owner's trash after the End-trigger delete"
     )
 
 
