@@ -113,5 +113,6 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     postUserView,
     userEvents,
     botSteps,
+    totalActions: newActions.length,
   });
 }
