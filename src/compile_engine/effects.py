@@ -130,12 +130,47 @@ def compute_line_value(state: GameState, line_idx: int, player: int) -> int:
 # Atomic helpers
 # ---------------------------------------------------------------------------
 
+# Per-atomic event flag helpers. After each atomic operation, we set a
+# scratch flag (player-keyed) that the engine drains as a coalesced
+# broadcast once the surrounding effect-stack resolves — matching Codex
+# p.6 "after" semantics (the after-trigger fires when the whole
+# triggering effect and its consequences finish, not per atomic step).
+def _flag_after_discard(state: GameState, player: int) -> None:
+    state.scratch[f"_pending_after_discard_by_p{player}"] = True
+
+
+def _flag_after_draw(state: GameState, player: int) -> None:
+    state.scratch[f"_pending_after_draw_by_p{player}"] = True
+
+
+def _flag_after_delete(state: GameState, deleter: int) -> None:
+    state.scratch[f"_pending_after_delete_by_p{deleter}"] = True
+
+
+def _flag_after_shuffle(state: GameState, player: int) -> None:
+    state.scratch[f"_pending_after_shuffle_by_p{player}"] = True
+
+
+def _flag_after_refresh(state: GameState, player: int) -> None:
+    state.scratch[f"_pending_after_refresh_by_p{player}"] = True
+
+
+def _flag_flip(state: GameState, card: CardInst) -> None:
+    # List of card instances whose flip needs to broadcast on the next
+    # drain. Stored as a list rather than a set so order is preserved
+    # (current-player's choice — Codex p.4 "Processing Multiple Cards
+    # Triggering Simultaneously").
+    lst = state.scratch.setdefault("_pending_flip_cards", [])
+    lst.append(card)
+
+
 def draw_cards(state: GameState, player: int, n: int) -> int:
     # Ice 6: blocked while own hand is non-empty.
     if player_cannot_draw(state, player):
         return 0
     ps = state.players[player]
     drawn = 0
+    shuffled = False
     for _ in range(n):
         if not ps.deck:
             if not ps.trash:
@@ -143,8 +178,13 @@ def draw_cards(state: GameState, player: int, n: int) -> int:
             ps.deck = ps.trash
             ps.trash = []
             state.rng.shuffle(ps.deck)
+            shuffled = True
         ps.hand.append(ps.deck.pop())
         drawn += 1
+    if drawn > 0:
+        _flag_after_draw(state, player)
+    if shuffled:
+        _flag_after_shuffle(state, player)
     return drawn
 
 
@@ -153,6 +193,7 @@ def discard_to_trash(state: GameState, player: int, hand_index: int) -> CardInst
     c = ps.hand.pop(hand_index)
     c.face_up = True
     state.players[c.owner].trash.append(c)
+    _flag_after_discard(state, player)
     return c
 
 
@@ -167,6 +208,10 @@ def delete_card_from_field(
     # If we removed a cover, the new top (if face-up) becomes uncovered → trigger.
     if was_top is False and stack and stack[-1].face_up:
         state.triggers.append(("uncover", line_idx, player, stack[-1]))
+    # "After you delete cards:" is attributed to the player who caused the
+    # delete — in nearly every case state.current_player. (Edge cases like
+    # opponent-driven flip→delete are still attributed to the active player.)
+    _flag_after_delete(state, state.current_player)
     _check_diversity_6_self_destruct(state)
     return c
 
@@ -178,6 +223,10 @@ def flip_card(state: GameState, line_idx: int, player: int, stack_pos: int) -> C
     c.face_up = not c.face_up
     if not was_up and c.face_up:
         state.triggers.append(("face_up", line_idx, player, c))
+    # `Flip:` emphasis fires whenever this card flips, either direction.
+    # We queue the flipped card so the engine broadcasts after current
+    # effect drains.
+    _flag_flip(state, c)
     _check_diversity_6_self_destruct(state)
     return c
 
@@ -222,10 +271,13 @@ def shift_card(
 
     # Push orchestration onto _pending in REVERSE chronological order.
     # Chronological order:
-    #   1. uncover of src's new top (if previously covered, face-up)
-    #   2. when_covered of dst's previously-top card (if applicable)
+    #   1. uncover of src's new top (if previously covered, face-up) —
+    #      Codex "Middle Command - Immediate: Resolve this active text
+    #      upon card play/flip/uncover."
+    #   2. when_covered of dst's previously-top card (Fire 0 errata)
     #   3. uncommit C
-    #   4. uncover middle of C (if C was previously covered at src and now uncovered at dst)
+    #   4. uncover middle of C (if C was previously covered at src and now
+    #      uncovered at dst — same Codex middle rule)
     # Push order: 4, 3, 2, 1 (last push = drains first = chronologically first).
     if c.face_up and not was_top:
         d = state.defs[c.def_id]
@@ -309,6 +361,7 @@ def refresh_player(state: GameState, player: int) -> None:
     need = 5 - len(ps.hand)
     if need > 0:
         draw_cards(state, player, need)
+    _flag_after_refresh(state, player)
 
 
 # ---------------------------------------------------------------------------
@@ -656,13 +709,35 @@ def player_skips_check_cache(state: GameState, player: int) -> bool:
 
 EffectGen = Generator[Choice, int, None]
 EffectFn = Callable[[GameState, int, int, CardInst], EffectGen]
+
+# -- Position-based triggers ------------------------------------------------
+# These fire (or used to fire) based on the card's position in the stack
+# when it enters play. After the bugfix, MIDDLE_EFFECTS only fire on the
+# `when_covered` event, not on play — this matches the actual rules text
+# ("middle effect activates when this card becomes covered").
 MIDDLE_EFFECTS: dict[str, EffectFn] = {}
 BOTTOM_FIRST_EFFECTS: dict[str, EffectFn] = {}
 BOTTOM_ON_PLAY_EFFECTS: dict[str, EffectFn] = {}
+TOP_TRIGGER_EFFECTS: dict[str, EffectFn] = {}
+
+# -- Turn-phase triggers ----------------------------------------------------
 START_EFFECTS: dict[str, EffectFn] = {}
 END_EFFECTS: dict[str, EffectFn] = {}
-TOP_TRIGGER_EFFECTS: dict[str, EffectFn] = {}
-WHEN_COVERED_EFFECTS: dict[str, EffectFn] = {}
+
+# -- Event-based triggers (new) --------------------------------------------
+# Each fires for face-up cards in the affected player's field whenever the
+# named event happens. Use these for "After …:" / "When …:" emphasised top
+# texts that were previously (incorrectly) registered as @top_trigger.
+WHEN_COVERED_EFFECTS: dict[str, EffectFn] = {}      # also auto-fires MIDDLE_EFFECTS for the covered card
+AFTER_CLEAR_CACHE_EFFECTS: dict[str, EffectFn] = {}     # after CHECK_CACHE phase resolves
+AFTER_SELF_DISCARD_EFFECTS: dict[str, EffectFn] = {}    # after this player discards
+AFTER_OPP_DISCARD_EFFECTS: dict[str, EffectFn] = {}     # after opponent discards
+AFTER_SELF_DELETE_EFFECTS: dict[str, EffectFn] = {}     # after this player deletes a card
+AFTER_SELF_DRAW_EFFECTS: dict[str, EffectFn] = {}       # after this player draws ≥1 card
+AFTER_SELF_SHUFFLE_EFFECTS: dict[str, EffectFn] = {}    # after this player shuffles their deck
+AFTER_SELF_REFRESH_EFFECTS: dict[str, EffectFn] = {}    # after this player refreshes
+FLIP_TRIGGER_EFFECTS: dict[str, EffectFn] = {}          # whenever this card flips, either direction
+WHEN_DELETED_BY_COMPILE_EFFECTS: dict[str, EffectFn] = {}  # before this card is sent to trash by compile
 
 
 def _register(reg: dict[str, EffectFn], key: str):
@@ -693,11 +768,54 @@ def end_trigger(key: str):
 
 
 def top_trigger(key: str):
+    """Top-tier effect that fires WHEN THIS CARD BECOMES FACE-UP. Reserve
+    this decorator for unconditional one-shots like Speed 0 top ("Play
+    another card"). For top tiers with an emphasis like 'After you clear
+    cache:' / 'Start:' / 'End:' / 'After you discard:' etc., use the
+    event-specific decorators below — those events fire later, not on
+    play, and using @top_trigger gives the card a free extra effect on
+    play that the rules don't allow."""
     return _register(TOP_TRIGGER_EFFECTS, key)
 
 
 def when_covered(key: str):
     return _register(WHEN_COVERED_EFFECTS, key)
+
+
+def after_clear_cache(key: str):
+    return _register(AFTER_CLEAR_CACHE_EFFECTS, key)
+
+
+def after_self_discard(key: str):
+    return _register(AFTER_SELF_DISCARD_EFFECTS, key)
+
+
+def after_opp_discard(key: str):
+    return _register(AFTER_OPP_DISCARD_EFFECTS, key)
+
+
+def after_self_delete(key: str):
+    return _register(AFTER_SELF_DELETE_EFFECTS, key)
+
+
+def after_self_draw(key: str):
+    return _register(AFTER_SELF_DRAW_EFFECTS, key)
+
+
+def after_self_shuffle(key: str):
+    return _register(AFTER_SELF_SHUFFLE_EFFECTS, key)
+
+
+def after_self_refresh(key: str):
+    return _register(AFTER_SELF_REFRESH_EFFECTS, key)
+
+
+def flip_trigger(key: str):
+    return _register(FLIP_TRIGGER_EFFECTS, key)
+
+
+def when_deleted_by_compile(key: str):
+    return _register(WHEN_DELETED_BY_COMPILE_EFFECTS, key)
 
 
 def get_middle_effect(d: "CardDef") -> EffectFn | None:
@@ -726,6 +844,42 @@ def get_top_trigger(d: "CardDef") -> EffectFn | None:
 
 def get_when_covered_effect(d: "CardDef") -> EffectFn | None:
     return WHEN_COVERED_EFFECTS.get(d.key)
+
+
+def get_after_clear_cache_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_CLEAR_CACHE_EFFECTS.get(d.key)
+
+
+def get_after_self_discard_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_SELF_DISCARD_EFFECTS.get(d.key)
+
+
+def get_after_opp_discard_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_OPP_DISCARD_EFFECTS.get(d.key)
+
+
+def get_after_self_delete_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_SELF_DELETE_EFFECTS.get(d.key)
+
+
+def get_after_self_draw_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_SELF_DRAW_EFFECTS.get(d.key)
+
+
+def get_after_self_shuffle_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_SELF_SHUFFLE_EFFECTS.get(d.key)
+
+
+def get_after_self_refresh_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_SELF_REFRESH_EFFECTS.get(d.key)
+
+
+def get_flip_trigger_effect(d: "CardDef") -> EffectFn | None:
+    return FLIP_TRIGGER_EFFECTS.get(d.key)
+
+
+def get_when_deleted_by_compile_effect(d: "CardDef") -> EffectFn | None:
+    return WHEN_DELETED_BY_COMPILE_EFFECTS.get(d.key)
 
 
 # ---------------------------------------------------------------------------
@@ -952,8 +1106,9 @@ def _hate_2(state, ap, li, card):
             delete_card_from_field(state, ln, pl, pos)
 
 
-# Hate 3: top trigger "Draw 1 card"
-@top_trigger("AX01:Hate:3")
+# Hate 3 top: "After you delete cards: Draw 1 card." Conditional trigger
+# fires after the owner's delete action and all its consequences resolve.
+@after_self_delete("AX01:Hate:3")
 def _hate_3_top(state, ap, li, card):
     draw_cards(state, ap, 1)
     if False:
@@ -1681,9 +1836,13 @@ def _metal_3(state, ap, li, card):
             delete_card_from_field(state, ln, pl, pos)
 
 
-# Metal 6 top: "First, delete this card." — fires on flip face-up / play face-up.
-@top_trigger("MN01:Metal:6")
-def _metal_6_top(state, ap, li, card):
+# Metal 6 top: "When this card would be covered or flipped: First, delete
+# this card." Two trigger events both call the same delete-self handler.
+# `when_covered` fires when a card is being placed on top; `flip_trigger`
+# fires on any flip transition involving this card (face-up→face-down or
+# face-down→face-up — the rules don't distinguish for the "covered or
+# flipped" emphasis, so we treat both directions as triggering).
+def _metal_6_self_delete(state, ap, li, card):
     for ln in range(NUM_LINES):
         for pl in (0, 1):
             s = state.lines[ln].stack(pl)
@@ -1692,6 +1851,10 @@ def _metal_6_top(state, ap, li, card):
                 return
     if False:
         yield  # pragma: no cover
+
+
+when_covered("MN01:Metal:6")(_metal_6_self_delete)
+flip_trigger("MN01:Metal:6")(_metal_6_self_delete)
 
 
 # ----- PLAGUE (MN01) ----------------------------------------------------
@@ -1704,8 +1867,9 @@ def _plague_0(state, ap, li, card):
 # Plague 0 bottom is persistent (handled by opp_play_blocked_in_line).
 
 
-# Plague 1 top: "Draw 1 card" — one-shot trigger.
-@top_trigger("MN01:Plague:1")
+# Plague 1 top: "After your opponent discards cards: Draw 1 card."
+# Conditional trigger fires after the opponent discards.
+@after_opp_discard("MN01:Plague:1")
 def _plague_1_top(state, ap, li, card):
     draw_cards(state, ap, 1)
     if False:
@@ -1877,8 +2041,11 @@ def _speed_0(state, ap, li, card):
         engine.play_card_for_effect(ap, hi, ln, fu)
 
 
-# Speed 1 top: "Draw 1 card" — one-shot trigger
-@top_trigger("MN01:Speed:1")
+# Speed 1 top: "After you clear cache: Draw 1 card." — fires after the
+# Cache phase resolves on this player's turn (not on play). Routed via the
+# `after_clear_cache` event hook, broadcast from the engine after every
+# Clear Cache resolution.
+@after_clear_cache("MN01:Speed:1")
 def _speed_1_top(state, ap, li, card):
     draw_cards(state, ap, 1)
     if False:
@@ -1892,9 +2059,41 @@ def _speed_1(state, ap, li, card):
         yield  # pragma: no cover
 
 
-# Speed 2 top: "Shift this card, even if this card is covered." — affordance,
-# not currently exposed as a discrete action. Treated as passive flavor (no-op
-# for value/restrictions). Hook point.
+# Speed 2 top: "When this card would be deleted by compiling: Shift this
+# card, even if this card is covered." Per Codex p.11: when the compile
+# delete-all batch would include Speed 2, instead Speed 2 is shifted to
+# another line — the rest of the compile delete still resolves. We
+# register a `when_deleted_by_compile` interrupt that prompts a shift
+# target on the owner's side. The compile broadcaster excludes Speed 2
+# from the deletion list when this hook fires (see game.py).
+@when_deleted_by_compile("MN01:Speed:2")
+def _speed_2_top(state, ap, li, card):
+    # `ap` is the player who is compiling (could be the owner or opp).
+    # The shift decision belongs to the *owner* of Speed 2 (it's their
+    # card text).
+    owner = card.owner
+    src_stack = None
+    src_pos = None
+    for ln in range(NUM_LINES):
+        s = state.lines[ln].stack(owner)
+        if card in s:
+            src_stack = (ln, s)
+            src_pos = s.index(card)
+            break
+    if src_stack is None:
+        return
+    src_line, _ = src_stack
+    dest = [i for i in range(NUM_LINES) if i != src_line]
+    if not dest:
+        return
+    opts = [f"shift to L{i}" for i in dest]
+    idx = yield Choice(
+        prompt=f"Speed 2 would be deleted — shift to which line?",
+        options=opts, targets=dest, decider=owner,
+    )
+    if not (0 <= idx < len(dest)):
+        return
+    shift_card(state, src_line, owner, src_pos, dest[idx])
 
 
 @middle("MN01:Speed:3")
@@ -2008,8 +2207,35 @@ def _spirit_2(state, ap, li, card):
     flip_card(state, sln, spl, spos)
 
 
-# Spirit 3 top: persistent affordance ("you may shift this card even if covered")
-# — passive flavor; not exposed as discrete action.
+# Spirit 3 top: "After you draw cards: You may shift this card, even if
+# this card is covered." Fires after the owner draws ≥1 card and offers
+# an optional shift.
+@after_self_draw("MN01:Spirit:3")
+def _spirit_3_top(state, ap, li, card):
+    # `ap` is the player who drew. We only fire if this card's owner is
+    # the drawer (each player's own field fires for their own draws).
+    owner = card.owner
+    src_line = None
+    src_pos = None
+    for ln in range(NUM_LINES):
+        s = state.lines[ln].stack(owner)
+        if card in s:
+            src_line = ln
+            src_pos = s.index(card)
+            break
+    if src_line is None:
+        return
+    dest = [i for i in range(NUM_LINES) if i != src_line]
+    if not dest:
+        return
+    opts = [f"shift to L{i}" for i in dest] + ["skip"]
+    idx = yield Choice(
+        prompt="(optional) Shift Spirit 3",
+        options=opts, targets=dest + [-1], optional=True, decider=owner,
+    )
+    if idx == -1 or not (0 <= idx < len(dest)):
+        return
+    shift_card(state, src_line, owner, src_pos, dest[idx])
 
 
 @middle("MN01:Spirit:4")
@@ -2222,7 +2448,10 @@ def _chaos_4_bottom(state, ap, li, card):
 # (Clarity 0 top: passive value mod — handled in compute_line_value)
 # ---------------------------------------------------------------------------
 
-@top_trigger("MN02:Clarity:1")
+# Clarity 1 top: "Start: Reveal the top card of your deck. You may
+# discard the top card of your deck." Fires at the start of each of the
+# owner's turns while this card is face-up.
+@start_trigger("MN02:Clarity:1")
 def _clarity_1_top(state, ap, li, card):
     # Reveal top of deck. You may discard the top card of your deck.
     ps = state.players[ap]
@@ -2379,7 +2608,10 @@ def _clarity_4(state, ap, li, card):
 # MN02 — Corruption
 # ---------------------------------------------------------------------------
 
-@top_trigger("MN02:Corruption:0")
+# Corruption 0 top: "Flip: Flip 1 face-up covered or uncovered card in
+# this stack other than this card." The "Flip:" emphasis triggers
+# whenever this card itself flips (either direction).
+@flip_trigger("MN02:Corruption:0")
 def _corruption_0_top(state, ap, li, card):
     # Flip 1 face-up covered or uncovered card in this stack other than this card.
     stack = state.lines[li].stack(card.owner)
@@ -2444,7 +2676,8 @@ def _corruption_1_bottom(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@top_trigger("MN02:Corruption:2")
+# Corruption 2 top: "After you discard cards: Your opponent discards 1 card."
+@after_self_discard("MN02:Corruption:2")
 def _corruption_2_top(state, ap, li, card):
     yield from _discard_n(state, state.opponent(ap), 1)
 
@@ -2477,7 +2710,9 @@ def _corruption_3(state, ap, li, card):
     flip_card(state, t[0], t[1], t[2])
 
 
-@top_trigger("MN02:Corruption:6")
+# Corruption 6 top: "End: Either discard 1 card or delete this card."
+# Fires at the start of each End phase while this card is face-up.
+@end_trigger("MN02:Corruption:6")
 def _corruption_6_top(state, ap, li, card):
     # Either discard 1 card or delete this card.
     if not state.players[ap].hand:
@@ -2506,7 +2741,8 @@ def _corruption_6_top(state, ap, li, card):
 # MN02 — Courage
 # ---------------------------------------------------------------------------
 
-@top_trigger("MN02:Courage:0")
+# Courage 0 top: "Start: If you have no cards in hand, draw 1 card."
+@start_trigger("MN02:Courage:0")
 def _courage_0_top(state, ap, li, card):
     if not state.players[ap].hand:
         draw_cards(state, ap, 1)
@@ -2590,7 +2826,9 @@ def _courage_3_bottom(state, ap, li, card):
         shift_card(state, li, ap, s.index(card), best)
 
 
-@top_trigger("MN02:Courage:6")
+# Courage 6 top: "End: If your opponent has a higher value in this line
+# than you do, flip this card." Fires at End phase while face-up.
+@end_trigger("MN02:Courage:6")
 def _courage_6_top(state, ap, li, card):
     opp = state.opponent(ap)
     if compute_line_value(state, li, opp) > compute_line_value(state, li, ap):
@@ -3278,7 +3516,9 @@ def _time_1(state, ap, li, card):
         state.players[c.owner].trash.append(c)
 
 
-@top_trigger("MN02:Time:2")
+# Time 2 top (Codex 8/2025 errata): "After you shuffle your deck: Draw 1
+# card. Then, you may shift this card." Fires after the owner shuffles.
+@after_self_shuffle("MN02:Time:2")
 def _time_2_top(state, ap, li, card):
     draw_cards(state, ap, 1)
     # May shift this card.
@@ -3311,6 +3551,7 @@ def _time_2(state, ap, li, card):
         ps.deck.extend(ps.trash)
         ps.trash = []
         state.rng.shuffle(ps.deck)
+        _flag_after_shuffle(state, ap)
 
 
 @middle("MN02:Time:3")
@@ -3346,9 +3587,10 @@ def _time_4(state, ap, li, card):
 # MN02 — War
 # ---------------------------------------------------------------------------
 
-@top_trigger("MN02:War:0")
+# War 0 top: "After you refresh: You may flip this card." Fires after
+# the owner performs a Refresh action.
+@after_self_refresh("MN02:War:0")
 def _war_0_top(state, ap, li, card):
-    # "You may flip this card." — fires once on entering face-up; optional.
     idx = yield Choice(
         prompt="(optional) Flip War 0 now?",
         options=["flip", "skip"], targets=[0, -1], optional=True, decider=ap,
@@ -3484,10 +3726,20 @@ def _assim_4(state, ap, li, card):
 # AX02 — Diversity
 # ---------------------------------------------------------------------------
 
-# Diversity 6's "delete self if fewer than 3 distinct protocols on field" is
-# a CONTINUOUS predicate, applied via `_check_diversity_6_self_destruct` from
-# inside flip / shift / delete / return helpers. The card therefore has no
-# registered effect — its behaviour lives in the field-mutation pipeline.
+# Diversity 6 top: "End: If there are not at least 3 different protocols
+# on cards in the field, delete this card." Codex says this fires at End
+# phase only — not continuously. We register an end_trigger that checks
+# the condition and self-deletes when met.
+#
+# (`_check_diversity_6_self_destruct` is still invoked from field-mutation
+# helpers for backwards-compat — it's idempotent and only fires when the
+# condition is met. The rules-correct fire-point is the End trigger
+# below; the continuous check provides a defence-in-depth sweep.)
+@end_trigger("AX02:Diversity:6")
+def _diversity_6_top(state, ap, li, card):
+    _check_diversity_6_self_destruct(state)
+    if False:
+        yield None  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------

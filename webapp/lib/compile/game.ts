@@ -26,13 +26,22 @@ import {
 import {
   type EffectFn,
   type EffectGen,
+  getAfterClearCacheEffect,
+  getAfterOppDiscardEffect,
+  getAfterSelfDeleteEffect,
+  getAfterSelfDiscardEffect,
+  getAfterSelfDrawEffect,
+  getAfterSelfRefreshEffect,
+  getAfterSelfShuffleEffect,
   getBottomFirstEffect,
   getBottomOnPlayEffect,
   getEndEffect,
+  getFlipTriggerEffect,
   getMiddleEffect,
   getStartEffect,
   getTopTriggerEffect,
   getWhenCoveredEffect,
+  getWhenDeletedByCompileEffect,
   uncommitSentinel,
 } from "./effects";
 import {
@@ -247,22 +256,22 @@ export class Game {
   }
 
   /** Drive auto-phases + drain effect stack until a player decision is needed. */
-  private drive(): void {
+  /** Drain pending effects + triggers until a decision is needed or the
+   *  queue empties. Returns true if a decision is needed. */
+  private drainPending(): boolean {
     const st = this.state;
     while (true) {
-      // Hard kill-switch on per-turn budget.
       if (
         st.effectPushesThisTurn >= MAX_EFFECT_PUSHES_PER_TURN &&
         (this.pending.length > 0 || st.triggers.length > 0)
       ) {
         this.pending = [];
         st.triggers = [];
-        break;
+        return false;
       }
-      // Drain effect stack with LIFO trigger interrupts.
       while (this.pending.length > 0) {
         const top = this.pending[this.pending.length - 1];
-        if (top.lastChoice) return;
+        if (top.lastChoice) return true;
         if (st.triggers.length > 0) { this.fireNextTrigger(); continue; }
         const res = top.gen.next();
         if (res.done) {
@@ -271,10 +280,20 @@ export class Game {
           continue;
         }
         top.lastChoice = res.value;
-        return;
+        return true;
       }
       if (st.triggers.length > 0) { this.fireNextTrigger(); continue; }
-      break;
+      return false;
+    }
+  }
+
+  private drive(): void {
+    const st = this.state;
+    // Drain effects, then any deferred "after X" broadcasts, then drain
+    // again. Loop until stable or a decision is needed.
+    while (true) {
+      if (this.drainPending()) return;
+      if (!this.drainPendingAfterEvents()) break;
     }
     // Phase advancement.
     while (true) {
@@ -290,7 +309,19 @@ export class Game {
       if (st.phase === "CHECK_CACHE") {
         const ps = st.players[st.currentPlayer];
         if (playerSkipsCheckCache(st, st.currentPlayer)) { st.phase = "END"; continue; }
-        if (ps.hand.length <= HAND_SIZE_LIMIT) { st.phase = "END"; continue; }
+        if (ps.hand.length <= HAND_SIZE_LIMIT) {
+          // Cache phase complete — fire `After you clear cache:` triggers if
+          // a discard happened, then drain them before END.
+          const ap = st.currentPlayer;
+          const fk = `_pending_after_clear_cache_p${ap}`;
+          const scratch = st.scratch as Record<string, unknown>;
+          if (scratch[fk]) {
+            delete scratch[fk];
+            this.broadcastAfterClearCache(ap);
+            if (this.drainPending()) return;
+          }
+          st.phase = "END"; continue;
+        }
         return;
       }
       if (st.phase === "END") { if (this.doEndPhase()) return; continue; }
@@ -494,6 +525,42 @@ export class Game {
   private doCompile(a: Action): void {
     if (a.type !== "COMPILE_LINE" || a.lineIndex == null) throw new Error("expected COMPILE_LINE");
     const st = this.state;
+    const ln = a.lineIndex;
+    const line = st.lines[ln];
+    // Codex p.11: when compiling, all cards in the line are deleted "at the
+    // same time". Cards with a `when_deleted_by_compile` interrupt (Speed 2)
+    // fire first and can shift themselves out, surviving the compile.
+    const interrupts: Array<{ pl: PlayerIndex; c: CardInst; fn: EffectFn }> = [];
+    for (const pl of [0, 1] as PlayerIndex[]) {
+      const stack = pl === 0 ? line.p0Stack : line.p1Stack;
+      for (const c of stack) {
+        if (!c.faceUp || c.defId === -1) continue;
+        const fn = getWhenDeletedByCompileEffect(c.defId);
+        if (fn) interrupts.push({ pl, c, fn });
+      }
+    }
+    if (interrupts.length === 0) {
+      this.compileFinalize(a);
+      return;
+    }
+    const ap = st.currentPlayer;
+    // Push finalizer first (drains last), then interrupts in reverse so the
+    // first-listed drains first under LIFO.
+    this.pushEffect(this.compileFinalizerGen(a));
+    for (let i = interrupts.length - 1; i >= 0; i--) {
+      const it = interrupts[i];
+      this.pushEffect(it.fn(st, ap, ln, it.c));
+    }
+  }
+
+  private *compileFinalizerGen(a: Action): EffectGen {
+    this.compileFinalize(a);
+    if (false) yield {} as Choice;
+  }
+
+  private compileFinalize(a: Action): void {
+    if (a.type !== "COMPILE_LINE" || a.lineIndex == null) throw new Error("expected COMPILE_LINE");
+    const st = this.state;
     const ap = st.currentPlayer;
     const opp: PlayerIndex = ap === 0 ? 1 : 0;
     const ln = a.lineIndex;
@@ -501,11 +568,9 @@ export class Game {
     for (const c of line.p0Stack) { c.faceUp = true; st.players[c.owner].trash.push(c); }
     for (const c of line.p1Stack) { c.faceUp = true; st.players[c.owner].trash.push(c); }
     line.p0Stack = []; line.p1Stack = [];
-    // Compile bulk-trashes both sides — protocol count can drop, check Diversity 6.
     const { checkDiversity6SelfDestruct } = require("./helpers");
     checkDiversity6SelfDestruct(st);
     if (st.players[ap].compiled[ln]) {
-      // Recompile — steal top of opp deck.
       if (st.players[opp].deck.length > 0) {
         const c = st.players[opp].deck.pop()!;
         c.owner = ap; c.faceUp = false;
@@ -645,6 +710,90 @@ export class Game {
     // in its identity so the trash stays consistent for any later inspection.
     this.patchPlaceholderFromAction(this.state.currentPlayer, a);
     discardToTrash(this.state, this.state.currentPlayer, a.handIndex);
+    // Flag that this CHECK_CACHE phase performed a Clear Cache action so the
+    // exit transition broadcasts `After you clear cache:` triggers.
+    (this.state.scratch as Record<string, unknown>)[
+      `_pending_after_clear_cache_p${this.state.currentPlayer}`
+    ] = true;
+  }
+
+  private broadcastForSide(
+    owner: PlayerIndex,
+    getter: (defId: number) => EffectFn | null,
+  ): boolean {
+    const st = this.state;
+    let pushed = false;
+    for (let ln = 0; ln < 3; ln++) {
+      for (const c of [...lineStack(st.lines[ln], owner)]) {
+        if (!c.faceUp || c.defId === -1) continue;
+        const fn = getter(c.defId);
+        if (fn) { this.pushEffect(fn(st, owner, ln, c)); pushed = true; }
+      }
+    }
+    return pushed;
+  }
+
+  private broadcastAfterClearCache(owner: PlayerIndex): boolean {
+    return this.broadcastForSide(owner, getAfterClearCacheEffect);
+  }
+
+  private drainPendingAfterEvents(): boolean {
+    const st = this.state;
+    const scratch = st.scratch as Record<string, unknown>;
+    let pushedAny = false;
+    for (const p of [0, 1] as PlayerIndex[]) {
+      const dk = `_pending_after_discard_by_p${p}`;
+      if (scratch[dk]) {
+        delete scratch[dk];
+        pushedAny = this.broadcastForSide(p, getAfterSelfDiscardEffect) || pushedAny;
+        pushedAny = this.broadcastForSide((1 - p) as PlayerIndex, getAfterOppDiscardEffect) || pushedAny;
+      }
+    }
+    for (const p of [0, 1] as PlayerIndex[]) {
+      const dk = `_pending_after_draw_by_p${p}`;
+      if (scratch[dk]) {
+        delete scratch[dk];
+        pushedAny = this.broadcastForSide(p, getAfterSelfDrawEffect) || pushedAny;
+      }
+    }
+    for (const p of [0, 1] as PlayerIndex[]) {
+      const dk = `_pending_after_delete_by_p${p}`;
+      if (scratch[dk]) {
+        delete scratch[dk];
+        pushedAny = this.broadcastForSide(p, getAfterSelfDeleteEffect) || pushedAny;
+      }
+    }
+    for (const p of [0, 1] as PlayerIndex[]) {
+      const dk = `_pending_after_shuffle_by_p${p}`;
+      if (scratch[dk]) {
+        delete scratch[dk];
+        pushedAny = this.broadcastForSide(p, getAfterSelfShuffleEffect) || pushedAny;
+      }
+    }
+    for (const p of [0, 1] as PlayerIndex[]) {
+      const dk = `_pending_after_refresh_by_p${p}`;
+      if (scratch[dk]) {
+        delete scratch[dk];
+        pushedAny = this.broadcastForSide(p, getAfterSelfRefreshEffect) || pushedAny;
+      }
+    }
+    const flips = scratch["_pending_flip_cards"] as CardInst[] | undefined;
+    if (flips && flips.length > 0) {
+      delete scratch["_pending_flip_cards"];
+      for (const c of flips) {
+        for (let ln = 0; ln < 3; ln++) {
+          for (const pl of [0, 1] as PlayerIndex[]) {
+            const s = lineStack(st.lines[ln], pl);
+            if (s.includes(c) && c.faceUp) {
+              const fn = getFlipTriggerEffect(c.defId);
+              if (fn) { this.pushEffect(fn(st, pl, ln, c)); pushedAny = true; }
+              break;
+            }
+          }
+        }
+      }
+    }
+    return pushedAny;
   }
 
   /** Record-mode helper: when an action carries `revealedDefId`, patch the
