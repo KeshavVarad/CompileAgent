@@ -165,6 +165,7 @@ export function GameClient({ gameId, initialView }: Props) {
             boardKeysWithActions={boardKeysWithActions}
             onSelect={(s) => setSelection(s)}
           />
+          <TurnStatusBanner view={view} me={me} pending={pending} />
           <PlayerStrip view={view} side={me} isMe />
           <HandRow
             view={view}
@@ -438,8 +439,8 @@ function LineCard({
   const oppCompiled = oppSeat === 0 ? line.p0Compiled : line.p1Compiled;
 
   return (
-    <div className="rounded-lg border bg-card overflow-hidden flex flex-col">
-      <div className="px-3 py-2 bg-muted/40 flex items-center justify-between border-b">
+    <div className="rounded-lg border bg-card overflow-hidden flex flex-col min-h-[480px]">
+      <div className="px-3 py-2 bg-muted/40 flex items-center justify-between border-b shrink-0">
         <span className="text-[10px] font-mono text-muted-foreground">L{line.index + 1}</span>
         <div className="flex items-center gap-2">
           <span className="font-semibold text-sm">{oppProto ?? "—"}</span>
@@ -447,24 +448,35 @@ function LineCard({
           <span className={`text-sm font-mono ${oppValue > myValue ? "text-amber-500" : "text-muted-foreground"}`}>{oppValue}</span>
         </div>
       </div>
-      <Stack
-        stack={oppStack}
-        owner="opp"
-        lineIndex={line.index}
-        selection={null}
-        boardKeysWithActions={new Set()}
-        onSelect={() => {}}
-      />
-      <div className="h-px bg-border" />
-      <Stack
-        stack={myStack}
-        owner="me"
-        lineIndex={line.index}
-        selection={selection}
-        boardKeysWithActions={boardKeysWithActions}
-        onSelect={onSelect}
-      />
-      <div className="px-3 py-2 bg-muted/40 flex items-center justify-between border-t">
+      {/* Each side gets equal flex space so the centre divider stays at
+          the visual midline regardless of how many cards either player
+          has. The opp half anchors content to the top (justify-start)
+          so opp's stack hangs from the header; the me half anchors to
+          the bottom (justify-end) so my stack rises off my footer. */}
+      <div className="flex-1 flex flex-col items-stretch min-h-0">
+        <div className="flex-1 flex flex-col items-stretch min-h-0 overflow-hidden">
+          <Stack
+            stack={oppStack}
+            owner="opp"
+            lineIndex={line.index}
+            selection={null}
+            boardKeysWithActions={new Set()}
+            onSelect={() => {}}
+          />
+        </div>
+        <div className="h-px bg-border shrink-0" />
+        <div className="flex-1 flex flex-col items-stretch justify-end min-h-0 overflow-hidden">
+          <Stack
+            stack={myStack}
+            owner="me"
+            lineIndex={line.index}
+            selection={selection}
+            boardKeysWithActions={boardKeysWithActions}
+            onSelect={onSelect}
+          />
+        </div>
+      </div>
+      <div className="px-3 py-2 bg-muted/40 flex items-center justify-between border-t shrink-0">
         <span className={`text-sm font-mono ${myValue > oppValue ? "text-emerald-500" : "text-muted-foreground"}`}>{myValue}</span>
         <div className="flex items-center gap-2">
           {myCompiled && <Badge variant="default" className="text-[10px]">compiled</Badge>}
@@ -869,6 +881,97 @@ function groupSelectionActions(actions: ActionView[]): { heading: string; action
   return order
     .filter((h) => buckets[h]?.length)
     .map((heading) => ({ heading, actions: buckets[heading] }));
+}
+
+function TurnStatusBanner({
+  view, me, pending,
+}: { view: GameView; me: 0 | 1; pending: boolean }) {
+  if (view.isOver || view.draft) return null;
+  const decider = view.decider;
+  const oppLabel = me === 0 ? view.config.player1Label : view.config.player0Label;
+  const phase = view.phase;
+
+  // Mid-effect choice prompts take priority — they're displayed in their
+  // own modal/bar via ChoiceDialog, so we just label the situation here.
+  if (view.pendingChoice && view.pendingChoice.decider === me) {
+    return (
+      <Card className="my-3 border-emerald-500/40">
+        <CardContent className="py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Badge variant="default" className="text-[10px] uppercase">your decision</Badge>
+            <span className="text-sm font-medium">{view.pendingChoice.prompt}</span>
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {view.pendingChoice.options.length} option{view.pendingChoice.options.length === 1 ? "" : "s"} ·
+            {" "}choose below
+          </span>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Bot is the decider — engine usually auto-advances server-side, so this
+  // banner appears only briefly during the network round-trip.
+  if (decider !== me) {
+    return (
+      <Card className="my-3 border-amber-500/30">
+        <CardContent className="py-3 flex items-center gap-2">
+          <Badge variant="secondary" className="text-[10px] uppercase">opponent</Badge>
+          <span className="text-sm">
+            {pending ? `${oppLabel} is thinking…` : `Waiting on ${oppLabel}…`}
+          </span>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Decider is me — phase-specific guidance.
+  const myHand = view.players[me].hand.length;
+  const myDeck = view.players[me].deckCount;
+  const compileActions = view.legalActions.filter((a) => a.type === "COMPILE_LINE");
+  const compileLines = compileActions.map((a) => a.lineIndex! + 1);
+
+  let label = "your turn";
+  let message = "Pick a card to play, or refresh / compile from the action bar.";
+  let highlight: "default" | "warn" | "info" = "default";
+  if (phase === "CHECK_CACHE") {
+    const overshoot = Math.max(0, myHand - 5);
+    label = "clear cache";
+    message = overshoot > 0
+      ? `You have ${myHand} cards in hand. Discard ${overshoot} more to get to 5.`
+      : "Cache phase — the engine will move on momentarily.";
+    highlight = "warn";
+  } else if (phase === "CHECK_COMPILE" || compileLines.length > 0) {
+    label = "compile";
+    message = `You meet the compile requirements in line ${compileLines.join(", ")}. ` +
+      `Per the rules you must compile this turn.`;
+    highlight = "info";
+  } else if (phase === "ACTION") {
+    label = "your turn";
+    const canRefresh = view.legalActions.some((a) => a.type === "REFRESH");
+    const handBits = myHand === 0 ? "your hand is empty — refresh" : `${myHand} cards in hand`;
+    const deckBits = myDeck === 0 ? " (deck empty)" : "";
+    message = `${handBits}${deckBits}. Click a card to see plays${canRefresh ? ", or refresh from the action bar" : ""}.`;
+  }
+
+  const borderClass =
+    highlight === "warn" ? "border-amber-500/50" :
+    highlight === "info" ? "border-sky-500/40" :
+    "border-emerald-500/40";
+
+  return (
+    <Card className={`my-3 ${borderClass}`}>
+      <CardContent className="py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Badge variant="default" className="text-[10px] uppercase">{label}</Badge>
+          <span className="text-sm">{message}</span>
+        </div>
+        <span className="text-xs font-mono text-muted-foreground">
+          turn {view.turn} · {phase.toLowerCase().replace("_", " ")}
+        </span>
+      </CardContent>
+    </Card>
+  );
 }
 
 function GameOverBanner({ view }: { view: GameView }) {

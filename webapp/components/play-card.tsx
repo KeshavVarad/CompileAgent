@@ -58,18 +58,18 @@ export function PlayCard({
   const headerLabel = isBoardFaceDown ? "face-down" : card.protocol;
   const headerValue = isBoardFaceDown ? 2 : card.value;
 
-  // Which tier is "active" right now (Codex p.13 "Card Anatomy"):
-  //   board, face-up         → T  (top is "Persistent" — passive text
-  //                                 active while face-up regardless of
-  //                                 cover state)
-  //   board, face-down       → none
-  //   hand                   → none (no position yet)
-  // (Middle is "Immediate" — fires once on play/flip/uncover, no
-  //  continuous active state. Bottom is "Auxiliary" — viable only when
-  //  uncovered, but mostly event-triggered rather than passive, so we
-  //  don't highlight it as continuously live.)
-  const activeTier: "T" | null =
-    variant === "board" && !isBoardFaceDown ? "T" : null;
+  // Which tiers are "live" right now (Codex p.13 "Card Anatomy"):
+  //   T — Persistent: active while card is face-up regardless of cover.
+  //   M — Immediate: fires once on play/flip/uncover. No continuous
+  //       active state, so never highlighted.
+  //   B — Auxiliary: only viable while the card is uncovered. We
+  //       highlight it only if the card actually has bottom text;
+  //       otherwise the emerald wash on an empty tier is misleading.
+  // Both T and B highlights surface persistent effects "on the part of
+  // the card where the effect lives" so the player can scan the field
+  // and see what's still in play.
+  const tHighlighted = variant === "board" && !isBoardFaceDown && !!card.topText;
+  const bHighlighted = variant === "board" && !isBoardFaceDown && uncovered && !!card.bottomText;
 
   return (
     <div
@@ -88,9 +88,12 @@ export function PlayCard({
       }
       style={{ height: CARD_TOTAL_PX }}
       className={cn(
+        // Solid card body — no opacity even when face-down. A face-down
+        // card that's been played from the recorder's own seat is fully
+        // known to the engine, and it still needs to opaquely cover the
+        // bottom of whatever card it's stacked on top of.
         "relative flex flex-col rounded-md border bg-card text-card-foreground shadow-sm overflow-hidden select-none transition",
         "w-full max-w-[178px]",
-        isBoardFaceDown && "opacity-80",
         card.isCommitted && "ring-1 ring-amber-500/50",
         selected && "ring-2 ring-emerald-500/70",
         interactive && "cursor-pointer hover:border-foreground/40",
@@ -111,9 +114,9 @@ export function PlayCard({
           {headerValue}
         </span>
       </div>
-      <CardTier label="T" text={card.topText} active={activeTier === "T"} faceDown={isBoardFaceDown} />
+      <CardTier label="T" text={card.topText} active={tHighlighted} faceDown={isBoardFaceDown} />
       <CardTier label="M" text={card.middleText} active={false} faceDown={isBoardFaceDown} />
-      <CardTier label="B" text={card.bottomText} active={false} faceDown={isBoardFaceDown} />
+      <CardTier label="B" text={card.bottomText} active={bHighlighted} faceDown={isBoardFaceDown} />
     </div>
   );
 }
@@ -189,18 +192,23 @@ function FaceDownBack({
       }
       style={{ height: CARD_TOTAL_PX }}
       className={cn(
-        "relative w-full max-w-[178px] rounded-md border border-dashed bg-muted/30 text-muted-foreground",
+        // Solid card body so face-down cards opaquely cover the bottom
+        // tiers of the card beneath them in a stack (rather than being a
+        // ghosted overlay you can read text through). `bg-muted` gives
+        // the back a clear "different from face-up" colour while staying
+        // fully opaque.
+        "relative w-full max-w-[178px] rounded-md border border-foreground/15 bg-muted text-muted-foreground shadow-sm",
         "flex flex-col items-center justify-center select-none transition",
         selected && "ring-2 ring-emerald-500/70",
-        interactive && "cursor-pointer hover:bg-muted/50 hover:border-foreground/40",
+        interactive && "cursor-pointer hover:bg-muted/80 hover:border-foreground/40",
         disabled && "opacity-50 cursor-not-allowed",
         className,
       )}
     >
-      <span className="text-[10px] font-mono uppercase tracking-[0.2em] opacity-60">
+      <span className="text-[10px] font-mono uppercase tracking-[0.2em] text-foreground/70">
         {variant === "hand" ? "unknown" : "face-down"}
       </span>
-      <span className="mt-1 font-mono text-lg opacity-70">2</span>
+      <span className="mt-1 font-mono text-lg text-foreground/80">2</span>
     </div>
   );
 }
