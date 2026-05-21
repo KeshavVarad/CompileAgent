@@ -20,3 +20,23 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const game = gameFromRow(row);
   return NextResponse.json({ id: row.id, view: viewOfGame(game), row });
 }
+
+export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  if (!db) return NextResponse.json({ error: "database not configured" }, { status: 503 });
+  const session = await getSession();
+  if (!session) return NextResponse.json({ error: "not authenticated" }, { status: 401 });
+  const { id } = await params;
+  // Ownership check before deletion. Returns 404 to non-owners as well as
+  // not-found so we don't leak the existence of other users' game ids.
+  const rows = await db
+    .select({ userId: schema.games.userId })
+    .from(schema.games)
+    .where(eq(schema.games.id, id))
+    .limit(1);
+  const row = rows[0];
+  if (!row || row.userId !== session.userId) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  await db.delete(schema.games).where(eq(schema.games.id, id));
+  return NextResponse.json({ ok: true });
+}
