@@ -34,23 +34,82 @@ type IdentityRequest = {
   forSeat: 0 | 1;
 };
 
-// Delay between bot snapshots during animated playback. Tuned so each
-// bot step is readable but a long chain doesn't drag for half a minute.
-// Quick moves (plays / discards / draws) get the short delay; the slower
-// COMPILE_LINE / PLAY_FACE_UP that visibly mutate stacks get a longer
-// pause so the player can absorb the change.
-const BOT_STEP_DELAY_MS = 700;
-const BOT_STEP_DELAY_BIG_MS = 1100;
-const BOT_STEP_INITIAL_DELAY_MS = 350;
+// Two-phase animation timing for the bot's chain. Each step gets:
+//   1. ANNOUNCE: banner shows "Sparkv2 plays X face-up in line 2" before
+//      anything visible changes on the board. Holds for `announceMs` so
+//      the player has time to read the announcement and look at the
+//      current board.
+//   2. APPLY: the board updates to the post-step view. Holds for
+//      `settleMs` so the player can see what changed, then the next
+//      step begins.
+// Tuned for "immersive, not instantaneous" — a typical bot turn (1–3
+// steps) now takes 4–8 seconds instead of <2. Long chains are still
+// bounded by the cap-per-turn budget.
+const BOT_STEP_INITIAL_DELAY_MS = 700; // pause after user's action before bot starts
+const BOT_END_OF_CHAIN_MS = 2200;       // hold the last announcement before banner fades
 
-function delayFor(action: Action): number {
-  if (action.type === "COMPILE_LINE" || action.type === "PLAY_FACE_UP") {
-    return BOT_STEP_DELAY_BIG_MS;
+type StepTiming = {
+  /** How long the announce label sits on screen BEFORE the board
+   *  updates to the post-step view. Lets the player read what's about
+   *  to happen. */
+  announceMs: number;
+  /** How long the board sits in the post-step state AFTER the apply
+   *  before the next step's announce begins. Lets the player see what
+   *  changed. */
+  settleMs: number;
+};
+
+function timingFor(action: Action): StepTiming {
+  switch (action.type) {
+    case "COMPILE_LINE":
+      return { announceMs: 1400, settleMs: 1500 }; // most dramatic — line clears
+    case "PLAY_FACE_UP":
+      return { announceMs: 1200, settleMs: 1200 }; // big visual reveal
+    case "PLAY_FACE_DOWN":
+      return { announceMs: 1000, settleMs: 900 };  // card appears face-down
+    case "REFRESH":
+      return { announceMs: 900, settleMs: 700 };   // hand refill, no board change
+    case "DISCARD_CARD":
+      return { announceMs: 900, settleMs: 700 };
+    case "SHIFT_OWN_CARD":
+      return { announceMs: 1000, settleMs: 900 };
+    case "CHOOSE_TARGET":
+    case "SKIP_OPTIONAL":
+      return { announceMs: 800, settleMs: 600 };   // effect sub-decisions
+    case "DRAFT_PROTOCOL":
+      return { announceMs: 900, settleMs: 600 };
+    default:
+      return { announceMs: 1000, settleMs: 800 };
   }
-  return BOT_STEP_DELAY_MS;
+}
+
+/** Convert an imperative action label like "Play Plague 1 face-up in
+ *  line 2" into present-tense announcer narration ("plays Plague 1
+ *  face-up in line 2"). Keeps the agent's actions reading as a live
+ *  play-by-play instead of a stiff command list. */
+function toAnnouncerLabel(label: string): string {
+  const m = label.match(/^([A-Z][a-z]+)\b(.*)$/);
+  if (!m) return label;
+  const [, verb, rest] = m;
+  const lower = verb.toLowerCase();
+  const present = (() => {
+    if (lower === "play") return "plays";
+    if (lower === "compile") return "compiles";
+    if (lower === "refresh") return "refreshes";
+    if (lower === "draft") return "drafts";
+    if (lower === "discard") return "discards";
+    if (lower === "shift") return "shifts";
+    if (lower === "skip") return "skips";
+    if (lower === "option") return "picks option"; // "Option 3" → "picks option 3"
+    return lower; // fallback
+  })();
+  return `${present}${rest}`;
 }
 
 type BotStep = { action: Action; label: string; view: GameView; events: string[] };
+type Frame =
+  | { kind: "announce"; label: string; events: string[]; announceMs: number }
+  | { kind: "apply"; view: GameView; settleMs: number };
 
 export function GameClient({ gameId, initialView }: Props) {
   const [view, setView] = useState<GameView>(initialView);
@@ -61,38 +120,57 @@ export function GameClient({ gameId, initialView }: Props) {
   // client is mid-replay of Sparkv2's chain; user input should be
   // gated. `botLastAction` is the most recent bot action label to
   // surface on the status banner.
-  const [botQueue, setBotQueue] = useState<BotStep[]>([]);
+  // Queue of frames produced from bot steps. Each bot step yields two
+  // frames: an `announce` (banner text appears, board unchanged) and an
+  // `apply` (board updates to post-step view). The two-phase rhythm
+  // gives the agent's actions a "narrated" feel instead of jumping
+  // straight from one board state to the next.
+  const [botFrames, setBotFrames] = useState<Frame[]>([]);
   const [botLastLabel, setBotLastLabel] = useState<string | null>(null);
   const [botLastEvents, setBotLastEvents] = useState<string[]>([]);
-  const animating = botQueue.length > 0;
+  const animating = botFrames.length > 0;
 
-  // Step through the queued bot snapshots one at a time, updating the
-  // visible view and the "last bot action" label as we go. Cleared
-  // automatically when the queue empties.
+  // Drain frames one at a time:
+  //   - announce frame: pop after a short startup pause (initial step
+  //     only), set the banner label, then schedule the announce → apply
+  //     transition after announceMs.
+  //   - apply frame: hold for settleMs after the visual change so the
+  //     player can see what landed, then advance.
   useEffect(() => {
-    if (botQueue.length === 0) return;
-    const [next, ...rest] = botQueue;
-    const initial = botLastLabel === null;
-    const wait = initial ? BOT_STEP_INITIAL_DELAY_MS : delayFor(next.action);
-    const t = setTimeout(() => {
-      setView(next.view);
-      setBotLastLabel(next.label);
-      setBotLastEvents(next.events ?? []);
-      setBotQueue(rest);
-    }, wait);
-    return () => clearTimeout(t);
-  }, [botQueue, botLastLabel]);
+    if (botFrames.length === 0) return;
+    const next = botFrames[0];
+    const rest = botFrames.slice(1);
+    if (next.kind === "announce") {
+      const initial = botLastLabel === null;
+      const startup = initial ? BOT_STEP_INITIAL_DELAY_MS : 0;
+      const t = setTimeout(() => {
+        setBotLastLabel(next.label);
+        setBotLastEvents(next.events);
+        const tt = setTimeout(() => setBotFrames(rest), next.announceMs);
+        // tt cleanup handled by the next render re-entering this effect.
+        void tt;
+      }, startup);
+      return () => clearTimeout(t);
+    } else {
+      const t = setTimeout(() => {
+        setView(next.view);
+        const tt = setTimeout(() => setBotFrames(rest), next.settleMs);
+        void tt;
+      }, 0);
+      return () => clearTimeout(t);
+    }
+  }, [botFrames, botLastLabel]);
 
   // Clear the "last bot action" label a moment after the chain ends so
   // the banner returns to a normal turn-status message.
   useEffect(() => {
-    if (botQueue.length > 0 || botLastLabel === null) return;
+    if (botFrames.length > 0 || botLastLabel === null) return;
     const t = setTimeout(() => {
       setBotLastLabel(null);
       setBotLastEvents([]);
-    }, 1400);
+    }, BOT_END_OF_CHAIN_MS);
     return () => clearTimeout(t);
-  }, [botQueue, botLastLabel]);
+  }, [botFrames, botLastLabel]);
 
   const submit = useCallback(
     (action: Action) => {
@@ -124,7 +202,20 @@ export function GameClient({ gameId, initialView }: Props) {
           for (const e of userEvents) toast.message(e);
           setBotLastLabel(null);
           setBotLastEvents([]);
-          setBotQueue(steps);
+          // Expand each bot step into a (announce, apply) frame pair
+          // so the banner narrates the move before the board updates.
+          const frames: Frame[] = [];
+          for (const s of steps) {
+            const { announceMs, settleMs } = timingFor(s.action);
+            frames.push({
+              kind: "announce",
+              label: toAnnouncerLabel(s.label),
+              events: s.events ?? [],
+              announceMs,
+            });
+            frames.push({ kind: "apply", view: s.view, settleMs });
+          }
+          setBotFrames(frames);
         } catch (e) {
           toast.error(e instanceof Error ? e.message : "Step failed");
         }
@@ -239,7 +330,7 @@ export function GameClient({ gameId, initialView }: Props) {
             botActionLabel={botLastLabel}
             botEvents={botLastEvents}
             animating={animating}
-            queueRemaining={botQueue.length}
+            queueRemaining={Math.ceil(botFrames.length / 2)}
           />
           <PlayerStrip view={view} side={me} isMe />
           <HandRow
