@@ -125,12 +125,30 @@ export type Trigger =
    *  before proceeding to fire the face_up trigger that follows in LIFO. */
   | { kind: "reveal_placeholder"; line: number; player: PlayerIndex; card: CardInst };
 
-export type GameLogEntry = {
-  turn: number;
-  decider: PlayerIndex;
-  action: Action;
-  timestamp: number;
-};
+/**
+ * One entry in the per-game event log. Two shapes:
+ *   - "action": the canonical record of every step() call (used for replay)
+ *   - "info":   engine-emitted side-channel commentary for things that
+ *               happen but don't show up as discrete actions — e.g. an
+ *               effect tries to discard but the target's hand is empty,
+ *               or a draw bails because deck+trash are both exhausted.
+ *               These exist so the client can surface "tried X but
+ *               couldn't because Y" during the bot's animation chain.
+ */
+export type GameLogEntry =
+  | {
+      kind: "action";
+      turn: number;
+      decider: PlayerIndex;
+      action: Action;
+      timestamp: number;
+    }
+  | {
+      kind: "info";
+      turn: number;
+      text: string;
+      timestamp: number;
+    };
 
 export type GameState = {
   config: GameConfig;

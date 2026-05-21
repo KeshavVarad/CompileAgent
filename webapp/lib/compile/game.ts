@@ -244,7 +244,7 @@ export class Game {
     if (st.phase === "GAME_OVER") throw new Error("Game over");
 
     st.log.push({
-      turn: st.turn, decider: this.decider(), action, timestamp: Date.now(),
+      kind: "action", turn: st.turn, decider: this.decider(), action, timestamp: Date.now(),
     });
 
     if (this.pending.length > 0 && this.pending[this.pending.length - 1].lastChoice) {
