@@ -130,14 +130,19 @@ def test_effect_coverage_mn01_ax01():
     from compile_engine.effects import (
         MIDDLE_EFFECTS, BOTTOM_FIRST_EFFECTS, BOTTOM_ON_PLAY_EFFECTS,
         START_EFFECTS, END_EFFECTS, TOP_TRIGGER_EFFECTS, WHEN_COVERED_EFFECTS,
+        AFTER_CLEAR_CACHE_EFFECTS, AFTER_SELF_DISCARD_EFFECTS,
+        AFTER_OPP_DISCARD_EFFECTS, AFTER_SELF_DELETE_EFFECTS,
+        AFTER_SELF_DRAW_EFFECTS, AFTER_SELF_SHUFFLE_EFFECTS,
+        AFTER_SELF_REFRESH_EFFECTS, FLIP_TRIGGER_EFFECTS,
+        WHEN_DELETED_BY_COMPILE_EFFECTS,
     )
     defs = load_card_defs()
     passive_only_keys = {
-        "AX01:Apathy:0", "AX01:Apathy:2", "AX01:Apathy:4", "AX01:Hate:3",
-        "MN01:Darkness:2", "MN01:Death:1", "MN01:Life:0", "MN01:Metal:0",
-        "MN01:Metal:2", "MN01:Metal:6", "MN01:Plague:0", "MN01:Plague:1",
-        "MN01:Psychic:1", "MN01:Speed:1", "MN01:Speed:2", "MN01:Spirit:0",
-        "MN01:Spirit:1", "MN01:Spirit:3",
+        "AX01:Apathy:0", "AX01:Apathy:2", "AX01:Apathy:4",
+        "MN01:Darkness:2", "MN01:Metal:0",
+        "MN01:Metal:2", "MN01:Plague:0",
+        "MN01:Psychic:1", "MN01:Spirit:0",
+        "MN01:Spirit:1",
     }
     missing = []
     for d in defs:
@@ -152,6 +157,15 @@ def test_effect_coverage_mn01_ax01():
             or d.key in END_EFFECTS
             or d.key in TOP_TRIGGER_EFFECTS
             or d.key in WHEN_COVERED_EFFECTS
+            or d.key in AFTER_CLEAR_CACHE_EFFECTS
+            or d.key in AFTER_SELF_DISCARD_EFFECTS
+            or d.key in AFTER_OPP_DISCARD_EFFECTS
+            or d.key in AFTER_SELF_DELETE_EFFECTS
+            or d.key in AFTER_SELF_DRAW_EFFECTS
+            or d.key in AFTER_SELF_SHUFFLE_EFFECTS
+            or d.key in AFTER_SELF_REFRESH_EFFECTS
+            or d.key in FLIP_TRIGGER_EFFECTS
+            or d.key in WHEN_DELETED_BY_COMPILE_EFFECTS
         )
         has_text = bool(d.top_text or d.middle_text or d.bottom_text)
         if has_text and not has_effect and d.key not in passive_only_keys:
@@ -179,16 +193,21 @@ def test_effect_coverage_all_180_cards():
     from compile_engine.effects import (
         MIDDLE_EFFECTS, BOTTOM_FIRST_EFFECTS, BOTTOM_ON_PLAY_EFFECTS,
         START_EFFECTS, END_EFFECTS, TOP_TRIGGER_EFFECTS, WHEN_COVERED_EFFECTS,
+        AFTER_CLEAR_CACHE_EFFECTS, AFTER_SELF_DISCARD_EFFECTS,
+        AFTER_OPP_DISCARD_EFFECTS, AFTER_SELF_DELETE_EFFECTS,
+        AFTER_SELF_DRAW_EFFECTS, AFTER_SELF_SHUFFLE_EFFECTS,
+        AFTER_SELF_REFRESH_EFFECTS, FLIP_TRIGGER_EFFECTS,
+        WHEN_DELETED_BY_COMPILE_EFFECTS,
     )
     defs = load_card_defs()
     passive_only_keys = {
         # MN01 + AX01 — captured by persistent rules in compute_line_value or
         # restriction queries.
-        "AX01:Apathy:0", "AX01:Apathy:2", "AX01:Apathy:4", "AX01:Hate:3",
-        "MN01:Darkness:2", "MN01:Death:1", "MN01:Life:0", "MN01:Metal:0",
-        "MN01:Metal:2", "MN01:Metal:6", "MN01:Plague:0", "MN01:Plague:1",
-        "MN01:Psychic:1", "MN01:Speed:1", "MN01:Speed:2", "MN01:Spirit:0",
-        "MN01:Spirit:1", "MN01:Spirit:3",
+        "AX01:Apathy:0", "AX01:Apathy:2", "AX01:Apathy:4",
+        "MN01:Darkness:2", "MN01:Metal:0",
+        "MN01:Metal:2", "MN01:Plague:0",
+        "MN01:Psychic:1", "MN01:Spirit:0",
+        "MN01:Spirit:1",
         # MN02 — persistent value modifiers / global rules / play affordances
         "MN02:Clarity:0",     # +1 per card in hand (compute_line_value)
         "MN02:Mirror:0",      # +1 per opp card in line (compute_line_value)
@@ -196,7 +215,6 @@ def test_effect_coverage_all_180_cards():
         "MN02:Chaos:3",       # may play without matching protocols (legal_actions)
         "MN02:Fear:0",        # T: suppress opp middles (middle_suppressed)
         "MN02:Ice:6",         # T: no draw with hand (draw_cards)
-        "AX02:Diversity:6",   # T: continuous self-destruct (field mutation hook)
     }
     missing = []
     for d in defs:
@@ -208,6 +226,15 @@ def test_effect_coverage_all_180_cards():
             or d.key in END_EFFECTS
             or d.key in TOP_TRIGGER_EFFECTS
             or d.key in WHEN_COVERED_EFFECTS
+            or d.key in AFTER_CLEAR_CACHE_EFFECTS
+            or d.key in AFTER_SELF_DISCARD_EFFECTS
+            or d.key in AFTER_OPP_DISCARD_EFFECTS
+            or d.key in AFTER_SELF_DELETE_EFFECTS
+            or d.key in AFTER_SELF_DRAW_EFFECTS
+            or d.key in AFTER_SELF_SHUFFLE_EFFECTS
+            or d.key in AFTER_SELF_REFRESH_EFFECTS
+            or d.key in FLIP_TRIGGER_EFFECTS
+            or d.key in WHEN_DELETED_BY_COMPILE_EFFECTS
         )
         has_text = bool(d.top_text or d.middle_text or d.bottom_text)
         if has_text and not has_effect and d.key not in passive_only_keys:
@@ -595,6 +622,247 @@ def test_life_0_fires_at_end_only():
     assert life_0_inst in g.state.lines[0].p0_stack, (
         "Life 0 should remain in field after being covered (errata: only at End)"
     )
+
+
+def test_speed_1_top_fires_after_clear_cache_not_on_play():
+    """Speed 1 top: 'After you clear cache: Draw 1 card.' The 'After ...:'
+    emphasis means the top fires only when the Clear Cache action resolves
+    on the owner's turn — NOT when the card is played. Middle 'Draw 2 cards.'
+    DOES fire on play (Codex: middle is Immediate, on play/flip/uncover)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=3))
+    g.set_predetermined_draft([
+        ["Speed", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    speed_1 = next(d for d in defs if d.key == "MN01:Speed:1")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+
+    # Phase 1: Play Speed 1 face-up. Hand starts at 5 (one of them is Speed 1).
+    speed_1_inst = CardInst(inst_id=8001, def_id=speed_1.def_id, owner=0, face_up=False)
+    dummy_hand = [
+        CardInst(inst_id=8100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(4)
+    ]
+    g.state.players[0].hand = [speed_1_inst] + dummy_hand  # 5 cards
+    g.state.players[0].deck = [
+        CardInst(inst_id=8200 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(10)
+    ]
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+
+    pre_deck = len(g.state.players[0].deck)
+    g.step(Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0))
+    # Drain any choice prompts (there shouldn't be any — Speed 1 middle is
+    # a flat "Draw 2 cards.").
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Played 1, drew 2 from middle: 5 - 1 + 2 = 6. Top did NOT fire.
+    assert len(g.state.players[0].hand) == 6, (
+        f"on-play hand: middle should draw 2 (5-1+2=6), got {len(g.state.players[0].hand)}"
+    )
+    assert len(g.state.players[0].deck) == pre_deck - 2
+
+    # Phase 2: force CHECK_CACHE with hand > 5 → discard one → after_clear_cache
+    # broadcast fires Speed 1's top → +1 draw → net hand stays at 6.
+    g.state.phase = Phase.CHECK_CACHE
+    g._pending = []
+    g.state.scratch.pop("_pending_after_clear_cache_p0", None)
+    pre_deck_2 = len(g.state.players[0].deck)
+    # Discard hand index 0 (Light 1).
+    g.step(Action(type=ActionType.DISCARD_CARD, hand_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Discarded 1, drew 1 from Speed 1 top via after_clear_cache: net 6.
+    assert len(g.state.players[0].hand) == 6, (
+        f"after-clear-cache hand: expected 6 (-1 discard +1 draw), got {len(g.state.players[0].hand)}"
+    )
+    assert len(g.state.players[0].deck) == pre_deck_2 - 1, (
+        "Speed 1's after_clear_cache top should draw exactly 1"
+    )
+
+
+def test_plague_1_top_fires_after_opp_discards():
+    """Plague 1 top: 'After your opponent discards cards: Draw 1 card.' We
+    set up Plague 1 face-up on P0's field, force P1 to discard a card via
+    the Clear Cache phase, and assert P0 drew 1 card."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import discard_to_trash
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=5))
+    g.set_predetermined_draft([
+        ["Speed", "Light", "Plague"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    plague_1 = next(d for d in defs if d.key == "MN01:Plague:1")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    p1_inst = CardInst(inst_id=10001, def_id=plague_1.def_id, owner=0, face_up=True)
+    g.state.lines[2].p0_stack = [p1_inst]  # Plague is line 2
+    g.state.players[0].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=10100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(10)
+    ]
+    g.state.players[1].hand = [
+        CardInst(inst_id=10200 + i, def_id=light_1.def_id, owner=1, face_up=False)
+        for i in range(3)
+    ]
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # P1 discards from hand (simulate any-time discard via direct atomic).
+    g.state.current_player = 1
+    pre_p0_hand = len(g.state.players[0].hand)
+    pre_p0_deck = len(g.state.players[0].deck)
+    discard_to_trash(g.state, 1, 0)
+    g._drive()
+    # Plague 1 should have fired: P0 drew 1.
+    assert len(g.state.players[0].hand) == pre_p0_hand + 1, (
+        f"Plague 1 should draw 1 after opp discards; hand: {pre_p0_hand} → "
+        f"{len(g.state.players[0].hand)}"
+    )
+    assert len(g.state.players[0].deck) == pre_p0_deck - 1
+
+
+def test_hate_3_top_fires_after_self_delete():
+    """Hate 3 top: 'After you delete cards: Draw 1 card.' Trigger a delete
+    via a direct field-mutation helper and assert Hate 3 fired."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import delete_card_from_field
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=6, include_expansion=True))
+    g.set_predetermined_draft([
+        ["Hate", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    hate_3 = next(d for d in defs if d.key == "AX01:Hate:3")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    h3 = CardInst(inst_id=11001, def_id=hate_3.def_id, owner=0, face_up=True)
+    victim = CardInst(inst_id=11002, def_id=light_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [h3]
+    g.state.lines[1].p0_stack = [victim]
+    g.state.players[0].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=11100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    pre_hand = len(g.state.players[0].hand)
+    delete_card_from_field(g.state, 1, 0, 0)
+    g._drive()
+    assert len(g.state.players[0].hand) == pre_hand + 1, (
+        f"Hate 3 should draw 1 after a self-delete; got hand {len(g.state.players[0].hand)}"
+    )
+
+
+def test_speed_2_top_shifts_out_of_compile_line():
+    """Speed 2 top: 'When this card would be deleted by compiling: Shift
+    this card.' Setting up a compile-ready line with Speed 2 in it; on
+    compile, Speed 2 shifts to another line instead of being trashed."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=7))
+    g.set_predetermined_draft([
+        ["Speed", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    speed_2 = next(d for d in defs if d.key == "MN01:Speed:2")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # Stack value 10+ in line 0 so it's compileable.
+    sp2 = CardInst(inst_id=12001, def_id=speed_2.def_id, owner=0, face_up=True)
+    high_a = CardInst(inst_id=12002, def_id=next(d for d in defs if d.key == "MN01:Speed:5").def_id, owner=0, face_up=True)
+    high_b = CardInst(inst_id=12003, def_id=next(d for d in defs if d.key == "MN01:Speed:5").def_id, owner=0, face_up=True)
+    # Need ≥10 line value; Speed 2 (2) + Speed 5 (5) + Speed 5 (5) = 12.
+    g.state.lines[0].p0_stack = [sp2, high_a, high_b]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    g.state.phase = Phase.CHECK_COMPILE
+    # Drive to a compile decision.
+    g._drive()
+    # Should be waiting on COMPILE_LINE choice.
+    legal = g.legal_actions()
+    compile_actions = [a for a in legal if a.type is ActionType.COMPILE_LINE]
+    assert compile_actions, f"expected compile available; got {legal}"
+    g.step(compile_actions[0])
+    # Drain interrupt prompts (Speed 2 shift target choice).
+    while g._pending and g._pending[-1].last_choice is not None:
+        legal = g.legal_actions()
+        g.step(legal[0])
+    # Speed 2 must be on the field still (in some line other than 0).
+    on_field = [
+        ln for ln in range(3)
+        if sp2 in g.state.lines[ln].p0_stack
+    ]
+    assert on_field, "Speed 2 should have shifted out of the compile line, not been trashed"
+    assert on_field[0] != 0, f"Speed 2 should NOT remain in compiled line 0; on lines {on_field}"
+    assert sp2 not in g.state.players[0].trash, "Speed 2 must not be in trash after compile interrupt"
+
+
+def test_speed_1_top_does_not_fire_when_no_discard_happened():
+    """If the CHECK_CACHE phase passes with hand ≤ 5 (no Clear Cache action
+    performed), Speed 1's 'After you clear cache:' top must NOT fire — per
+    Codex, "Clear Cache" refers specifically to the discard action."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=4))
+    g.set_predetermined_draft([
+        ["Speed", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    speed_1 = next(d for d in defs if d.key == "MN01:Speed:1")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    speed_1_inst = CardInst(inst_id=9001, def_id=speed_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [speed_1_inst]
+    g.state.players[0].hand = [
+        CardInst(inst_id=9100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(3)
+    ]
+    g.state.players[0].deck = [
+        CardInst(inst_id=9200 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(10)
+    ]
+    g.state.current_player = 0
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    pre_hand = len(g.state.players[0].hand)
+    pre_deck = len(g.state.players[0].deck)
+    # Drive through CHECK_CACHE — hand is 3 (≤5), no discard needed.
+    g.state.phase = Phase.CHECK_CACHE
+    g._drive()
+    assert len(g.state.players[0].hand) == pre_hand, (
+        "no Clear Cache happened → Speed 1 top must not fire"
+    )
+    assert len(g.state.players[0].deck) == pre_deck
 
 
 def test_greedy_beats_random_more_often_than_not():

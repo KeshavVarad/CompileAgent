@@ -322,45 +322,54 @@ class Game:
 
     # ------------------------------------------------------------------ drive
 
-    def _drive(self) -> None:
-        """Advance through auto-phases, trigger queue, and effect resumption
-        until a real decision point is reached (or game ends)."""
+    def _drain_pending(self) -> bool:
+        """Resolve queued effects/triggers until either a decision is needed
+        (returns True) or the queue empties (returns False). Honors the
+        per-turn effect-push budget by dropping in-flight resolution if
+        exceeded."""
         st = self.state
-
         while True:
-            # Hard kill-switch if we've exceeded per-turn effect budget. Drop
-            # all in-flight resolution and let the turn proceed.
             if self._budget_exhausted() and (self._pending or st.triggers):
                 self._pending.clear()
                 st.triggers.clear()
-                break
-
+                return False
             while self._pending:
                 top = self._pending[-1]
                 if top.last_choice is not None:
-                    return
-                # LIFO interrupt: handle queued triggers before advancing.
+                    return True
                 if st.triggers:
                     self._fire_next_trigger()
                     continue
                 try:
                     choice = next(top.gen)
                 except StopIteration:
-                    # Remove this specific generator. We can't pop() blindly
-                    # because the generator may have pushed children below the
-                    # top during its final step (e.g., Speed 0's recursive play).
                     try:
                         self._pending.remove(top)
                     except ValueError:
                         pass
                     continue
                 top.last_choice = choice
-                return
-
+                return True
             if st.triggers:
                 self._fire_next_trigger()
                 continue
-            break
+            return False
+
+    def _drive(self) -> None:
+        """Advance through auto-phases, trigger queue, and effect resumption
+        until a real decision point is reached (or game ends). Phase steps
+        that push effects (start/end triggers, after_clear_cache broadcasts)
+        must be drained before advancing further, so each phase iteration
+        re-runs the drain."""
+        st = self.state
+
+        # Drain effects, then any deferred "after X" broadcasts, then drain
+        # again. Loop until everything stabilises (or a decision is needed).
+        while True:
+            if self._drain_pending():
+                return
+            if not self._drain_pending_after_events():
+                break
 
         # Advance phases.
         while True:
@@ -391,11 +400,25 @@ class Game:
                 return  # need a player action
             if st.phase is Phase.CHECK_CACHE:
                 ps = st.players[st.current_player]
-                # Spirit 0 bottom: skip check cache while uncovered.
+                # Spirit 0 bottom: skip check cache while uncovered. No
+                # Clear Cache action occurred → no after_clear_cache.
                 if player_skips_check_cache(st, st.current_player):
                     st.phase = Phase.END
                     continue
                 if len(ps.hand) <= HAND_SIZE_LIMIT:
+                    # Cache phase complete. If we discarded at least once
+                    # this phase, fire `After you clear cache:` triggers
+                    # (Codex p.6: "after" commands fire when the triggering
+                    # effect and its consequences are fully resolved).
+                    ap = st.current_player
+                    flag_key = f"_pending_after_clear_cache_p{ap}"
+                    if st.scratch.pop(flag_key, False):
+                        self._broadcast_after_clear_cache(ap)
+                        # Drain the broadcast effects before advancing to
+                        # END. If a choice is needed, return — drain
+                        # resumes on the next step.
+                        if self._drain_pending():
+                            return
                     st.phase = Phase.END
                     continue
                 return  # need DISCARD_CARD
@@ -505,10 +528,51 @@ class Game:
     def _do_compile(self, action: Action) -> None:
         assert action.type is ActionType.COMPILE_LINE
         st = self.state
+        ln = action.line_index
+        # Codex p.11: when compiling, "all cards in the line are deleted at
+        # the same time". Cards with a `when_deleted_by_compile` interrupt
+        # (Speed 2) get to fire before the bulk delete and can shift
+        # themselves out, escaping the compile. We collect interrupts now,
+        # push them as effects, and queue a finalizer that runs the bulk
+        # delete + protocol flip once interrupts resolve.
+        from .effects import get_when_deleted_by_compile_effect
+        interrupts: list[tuple[int, CardInst, object]] = []
+        for pl in (0, 1):
+            for c in st.lines[ln].stack(pl):
+                if not c.face_up:
+                    continue
+                d = st.defs[c.def_id]
+                fn = get_when_deleted_by_compile_effect(d)
+                if fn is not None:
+                    interrupts.append((pl, c, fn))
+
+        if not interrupts:
+            self._compile_finalize(action)
+            return
+
+        ap = st.current_player
+        # Push finalizer first (drains last). Then interrupts in reverse so
+        # the first listed drains first under LIFO.
+        self._push_effect(self._compile_finalizer_gen(action))
+        for pl, c, fn in reversed(interrupts):
+            self._push_effect(fn(st, ap, ln, c))
+
+    def _compile_finalizer_gen(self, action: Action):
+        """Generator wrapper that runs the bulk-delete + protocol flip
+        after `when_deleted_by_compile` interrupts (Speed 2 etc.) have
+        drained. Sits on `_pending` like any other effect."""
+        self._compile_finalize(action)
+        if False:
+            yield  # marks this as a generator
+
+    def _compile_finalize(self, action: Action) -> None:
+        st = self.state
         ap = st.current_player
         ln = action.line_index
         opp = 1 - ap
-        # Delete all cards on both sides in this line.
+        # Delete all remaining cards on both sides in this line. Cards that
+        # shifted out via a when_deleted_by_compile interrupt (Speed 2) are
+        # no longer in the line and survive.
         for c in st.lines[ln].p0_stack:
             c.face_up = True
             st.players[c.owner].trash.append(c)
@@ -524,8 +588,6 @@ class Game:
         # Compile / Recompile
         if st.players[ap].compiled[ln]:
             # Recompile: instead of flipping, draw top of opponent's deck.
-            # The card goes face-down? No — "draw the top card of your
-            # opponent's deck" puts it into our hand.
             if st.players[opp].deck:
                 stolen = st.players[opp].deck.pop()
                 # Ownership changes (per rules): "If a card ever changes
@@ -645,6 +707,10 @@ class Game:
         #   2. uncommit sentinel — clears is_committed before enter-play.
         #   3. when_covered effect (only if applicable) — drains first.
         if face_up:
+            # Codex "Middle Command - Immediate: Resolve this active text
+            # upon card play/flip/uncover." → middle fires on play. Push
+            # middle first so the LIFO drain runs top → bottom_first →
+            # bottom_on_play → middle (top resolves first).
             mid_fn = None if middle_suppressed(st, line_index, c) else get_middle_effect(d)
             if mid_fn is not None and d.middle_text:
                 self._push_effect(mid_fn(st, player, line_index, c))
@@ -659,7 +725,10 @@ class Game:
                 self._push_effect(top_fn(st, player, line_index, c))
         # Uncommit sentinel sits above all enter-play effects.
         self._push_effect(uncommit_sentinel(c))
-        # When-covered (drains first if present).
+        # When-covered: the card under us just transitioned uncovered →
+        # covered. Fire its `@when_covered` hook (Fire 0 errata bottom and
+        # similar). Middle is NOT fired here — middle fires on
+        # play/flip/uncover per the Codex, not on cover.
         if soon_covered is not None and soon_covered.face_up:
             from .effects import get_when_covered_effect
             d_under = st.defs[soon_covered.def_id]
@@ -694,8 +763,18 @@ class Game:
 
     def _enqueue_face_up_triggers(self, card: CardInst, ap: int, line_idx: int) -> None:
         """Push (in resolution order: top -> bottom-first -> middle) the
-        effects that fire when `card` enters face-up at (line, ap). Pushing in
-        reverse-resolution order yields LIFO drain that resolves top first.
+        effects that fire when `card` enters face-up at (line, ap). Pushing
+        in reverse-resolution order yields LIFO drain that resolves top
+        first.
+
+        Rules (Codex 22SEP2025 + rules.txt "Card Anatomy"):
+          - Top is PERSISTENT: passive text active while card is face-up.
+            Unconditional tops fire as a one-shot here. Tops with emphasis
+            ('Start:', 'End:', 'After you clear cache:', 'Flip:', 'When this
+            card would be ...:', etc.) must register on the matching
+            event-specific decorator, NOT @top_trigger.
+          - Middle is IMMEDIATE: resolves on play/flip/uncover.
+          - Bottom is AUXILIARY: triggered effects, viable while uncovered.
         """
         st = self.state
         d = st.defs[card.def_id]
@@ -720,7 +799,7 @@ class Game:
 
     def _enqueue_enter_play_triggers_skip_middle(self, card: CardInst, ap: int, line_idx: int) -> None:
         """Variant of `_enqueue_face_up_triggers` used by Luck 1, which says
-        'flip that card, ignoring its middle commands' — so top and bottom
+        'flip that card, ignoring its middle command' — so top and bottom
         triggers still fire, but middle does not."""
         st = self.state
         d = st.defs[card.def_id]
@@ -740,9 +819,14 @@ class Game:
         Trigger kinds:
           - ("uncommit", card): clear is_committed on `card`. No effect push.
           - ("when_covered", line, owner, card): fire the now-covered card's
-            registered when_covered effect (e.g. Fire 0 errata).
-          - ("face_up", line, owner, card): fire full enter-play stack.
-          - ("uncover", line, owner, card): fire middle only.
+            registered when_covered effect (e.g. Fire 0 errata bottom).
+            Middle is NOT fired here — middle fires on play/flip/uncover,
+            not on cover.
+          - ("face_up", line, owner, card): fire full enter-play stack
+            (top + bottom + middle).
+          - ("uncover", line, owner, card): fire middle (the Codex "Middle
+            Command - Immediate: Resolve this active text upon card
+            play/flip/uncover").
         """
         from .effects import get_when_covered_effect
         st = self.state
@@ -775,7 +859,7 @@ class Game:
         if kind == "face_up":
             self._enqueue_face_up_triggers(card, pl, ln)
             return
-        # "uncover"
+        # "uncover": fire middle only.
         d = st.defs[card.def_id]
         if middle_suppressed(st, ln, card):
             return
@@ -788,7 +872,112 @@ class Game:
         assert action.type is ActionType.DISCARD_CARD
         ap = self.state.current_player
         discard_to_trash(self.state, ap, action.hand_index)
+        # Mark that *this* CHECK_CACHE phase actually performed a discard
+        # (i.e., a Clear Cache action per Codex p.5: "discard action is
+        # called Clear Cache"). The transition out of CHECK_CACHE will
+        # broadcast `after_clear_cache` iff this flag is set.
+        self.state.scratch[f"_pending_after_clear_cache_p{ap}"] = True
         # Loop back via _drive to recheck size.
+
+    def _broadcast_after_clear_cache(self, ap: int) -> None:
+        """Push `@after_clear_cache` effects for every face-up card on
+        `ap`'s side of the field. Matches the side-of-field convention
+        used by Start/End effects. Multiple cards triggering at once:
+        Codex p.4 says the active player chooses the order; we push in
+        line-ascending order, which the LIFO drain reverses — line 2's
+        effect resolves first, line 0 last."""
+        st = self.state
+        from .effects import get_after_clear_cache_effect
+        for ln in range(NUM_LINES):
+            for c in list(st.lines[ln].stack(ap)):
+                if not c.face_up:
+                    continue
+                d = st.defs[c.def_id]
+                fn = get_after_clear_cache_effect(d)
+                if fn is not None:
+                    self._push_effect(fn(st, ap, ln, c))
+
+    def _broadcast_for_side(self, owner: int, getter) -> bool:
+        """Iterate face-up cards on `owner`'s side; for each card whose
+        def_id resolves via `getter` (one of the get_after_*_effect
+        wrappers), push the effect. Returns True iff anything pushed."""
+        st = self.state
+        pushed = False
+        for ln in range(NUM_LINES):
+            for c in list(st.lines[ln].stack(owner)):
+                if not c.face_up:
+                    continue
+                d = st.defs[c.def_id]
+                fn = getter(d)
+                if fn is not None:
+                    self._push_effect(fn(st, owner, ln, c))
+                    pushed = True
+        return pushed
+
+    def _drain_pending_after_events(self) -> bool:
+        """Check for deferred "after X" event flags set by atomic helpers
+        in effects.py. For each flag, broadcast the corresponding effects
+        to both players' fields (the "self" vs "opp" naming is relative
+        to the actor — e.g. `after_self_discard` fires on the discarder's
+        field; `after_opp_discard` fires on the other side). Returns True
+        if any effect was pushed (caller should drain again)."""
+        from .effects import (
+            get_after_self_discard_effect, get_after_opp_discard_effect,
+            get_after_self_delete_effect, get_after_self_draw_effect,
+            get_after_self_shuffle_effect, get_after_self_refresh_effect,
+            get_flip_trigger_effect,
+        )
+        st = self.state
+        pushed_any = False
+
+        # Discards: one flag per discarder. Fire that player's own
+        # `after_self_discard` plus the opponent's `after_opp_discard`.
+        for p in (0, 1):
+            key = f"_pending_after_discard_by_p{p}"
+            if st.scratch.pop(key, False):
+                pushed_any |= self._broadcast_for_side(p, get_after_self_discard_effect)
+                pushed_any |= self._broadcast_for_side(1 - p, get_after_opp_discard_effect)
+
+        # Draws — only the drawer's side fires `after_self_draw`.
+        for p in (0, 1):
+            key = f"_pending_after_draw_by_p{p}"
+            if st.scratch.pop(key, False):
+                pushed_any |= self._broadcast_for_side(p, get_after_self_draw_effect)
+
+        # Deletes — attributed to whoever was current_player at the time.
+        for p in (0, 1):
+            key = f"_pending_after_delete_by_p{p}"
+            if st.scratch.pop(key, False):
+                pushed_any |= self._broadcast_for_side(p, get_after_self_delete_effect)
+
+        # Shuffles — fires on shuffler's side.
+        for p in (0, 1):
+            key = f"_pending_after_shuffle_by_p{p}"
+            if st.scratch.pop(key, False):
+                pushed_any |= self._broadcast_for_side(p, get_after_self_shuffle_effect)
+
+        # Refresh — fires on refresher's side.
+        for p in (0, 1):
+            key = f"_pending_after_refresh_by_p{p}"
+            if st.scratch.pop(key, False):
+                pushed_any |= self._broadcast_for_side(p, get_after_self_refresh_effect)
+
+        # Flip triggers — list of card refs (the cards that flipped).
+        flip_list = st.scratch.pop("_pending_flip_cards", None)
+        if flip_list:
+            for c in flip_list:
+                # Locate the card in the field (it may have moved or left).
+                for ln in range(NUM_LINES):
+                    for pl in (0, 1):
+                        s = st.lines[ln].stack(pl)
+                        if c in s and c.face_up:
+                            d = st.defs[c.def_id]
+                            fn = get_flip_trigger_effect(d)
+                            if fn is not None:
+                                self._push_effect(fn(st, pl, ln, c))
+                                pushed_any = True
+                            break
+        return pushed_any
 
     def _do_end_phase(self) -> bool:
         st = self.state
