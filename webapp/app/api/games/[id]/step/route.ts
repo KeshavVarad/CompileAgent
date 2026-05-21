@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 import { eq } from "drizzle-orm";
 
 import { getSession } from "@/lib/auth";
-import type { Action } from "@/lib/compile/types";
+import type { Action, PlayerIndex } from "@/lib/compile/types";
 import { db, schema } from "@/lib/db";
 import { autoAdvanceBotWithSnapshots, botForStrategy, gameFromRow } from "@/lib/replay";
 import { type GameView, labelAction, viewOfGame } from "@/lib/view";
@@ -50,6 +50,15 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   const game = gameFromRow(row);
   if (game.isOver()) return NextResponse.json({ error: "game already over" }, { status: 400 });
 
+  // Information-set viewer for label redaction — the seat the human
+  // (or recorder) is sitting in. Bot face-down plays in the announce
+  // banner should not reveal identity to the human watching.
+  const viewer: PlayerIndex | undefined =
+    row.recorderSeat != null ? (row.recorderSeat as PlayerIndex)
+    : row.bot0Strategy != null && row.bot1Strategy == null ? 1
+    : row.bot1Strategy != null && row.bot0Strategy == null ? 0
+    : undefined;
+
   // Apply the player's action.
   const preUserLogLen = game.state.log.length;
   game.step(action);
@@ -79,7 +88,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       // Pre-step: label the action against the pre-step game state, and
       // record the current log length so we can slice out info events
       // that land during this step.
-      (g, a) => ({ label: labelAction(g, a), preLogLen: g.state.log.length }),
+      (g, a) => ({ label: labelAction(g, a, viewer), preLogLen: g.state.log.length }),
       // Post-step: bundle the post-state view, the captured label, and
       // the info-event delta.
       (a, captured, g) => ({

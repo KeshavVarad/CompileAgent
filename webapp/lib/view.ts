@@ -89,11 +89,17 @@ function viewCard(c: CardInst): CardView {
   };
 }
 
-export function labelAction(game: Game, a: Action): string {
+/** `viewer` is the seat whose information set the label is rendered for.
+ *  When set, opp face-down plays are redacted to "Opp plays face-down in
+ *  line N" — the viewer didn't see the card's identity at that moment.
+ *  Omitting `viewer` keeps the legacy "show everything" behaviour. */
+export function labelAction(game: Game, a: Action, viewer?: PlayerIndex): string {
   const st = game.state;
   if (a.type === "DRAFT_PROTOCOL") return `Draft ${a.protocol}`;
+  const actor = st.currentPlayer;
+  const isOppFromViewer = viewer !== undefined && viewer !== actor;
   if (a.type === "PLAY_FACE_UP") {
-    const c = st.players[st.currentPlayer].hand[a.handIndex!];
+    const c = st.players[actor].hand[a.handIndex!];
     const d = safeCardDef(c.defId);
     if (d.defId === -1 && typeof a.revealedDefId === "number") {
       const revealed = safeCardDef(a.revealedDefId);
@@ -103,7 +109,8 @@ export function labelAction(game: Game, a: Action): string {
     return `Play ${d.protocol} ${d.value} face-up in line ${a.lineIndex! + 1}`;
   }
   if (a.type === "PLAY_FACE_DOWN") {
-    const c = st.players[st.currentPlayer].hand[a.handIndex!];
+    if (isOppFromViewer) return `Opp plays face-down in line ${a.lineIndex! + 1}`;
+    const c = st.players[actor].hand[a.handIndex!];
     const d = safeCardDef(c.defId);
     if (d.defId === -1) return `Opp plays face-down in line ${a.lineIndex! + 1}`;
     return `Play ${d.protocol} ${d.value} face-down in line ${a.lineIndex! + 1}`;
