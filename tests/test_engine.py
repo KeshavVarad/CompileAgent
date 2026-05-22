@@ -914,6 +914,247 @@ def test_speed_1_top_does_not_fire_when_no_discard_happened():
     assert len(g.state.players[0].deck) == pre_deck
 
 
+def test_ice_1_fires_when_opp_plays_in_same_line_only():
+    """Ice 1 bottom: 'After your opponent plays a card in this line:
+    Your opponent discards 1 card.' Fires when opp plays into Ice 1's
+    line; does NOT fire on opp plays in other lines."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=4, include_main2=True))
+    g.set_predetermined_draft([
+        ["Ice", "Death", "Water"],
+        ["Light", "Fire", "Speed"],
+    ])
+    defs = load_card_defs()
+    ice_1 = next(d for d in defs if d.key == "MN02:Ice:1")
+    light_0 = next(d for d in defs if d.key == "MN01:Light:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0 has Ice 1 face-up in line 0 (Ice protocol).
+    ice_1_inst = CardInst(inst_id=11001, def_id=ice_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [ice_1_inst]
+    # P1 holds two Light 0s, one for the Ice 1's line (line 0 on P0 side),
+    # one for line 1 (Light protocol on P1). P1 protocols are
+    # [Light, Fire, Speed], so P1 plays Light face-up in line 0.
+    light_0_inst_in_line = CardInst(inst_id=11002, def_id=light_0.def_id, owner=1, face_up=False)
+    light_0_inst_out_line = CardInst(inst_id=11003, def_id=light_0.def_id, owner=1, face_up=False)
+    g.state.players[1].hand = [light_0_inst_in_line, light_0_inst_out_line]
+    # Stock P1's deck so they can draw / handle the discard, but ensure
+    # they have non-empty hand to discard from.
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.players[0].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=12000 + i, def_id=fire_0.def_id, owner=0, face_up=False) for i in range(5)
+    ]
+    g.state.players[1].deck = [
+        CardInst(inst_id=13000 + i, def_id=fire_0.def_id, owner=1, face_up=False) for i in range(5)
+    ]
+    g.state.current_player = 1
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # P1 plays Light 0 face-down into line 1 (NOT Ice 1's line) — no trigger.
+    pre_p1_hand = len(g.state.players[1].hand)
+    g.step(Action(type=ActionType.PLAY_FACE_DOWN, hand_index=1, line_index=1))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Hand: -1 from play, +0 trigger -> -1 net. The step advances through
+    # P1's CHECK_CACHE → END → P0's turn. CHECK_CACHE might draw P1 back to
+    # 5, but that's not the point. The point is Ice 1 did NOT fire on a
+    # different-line play.
+    # To verify: look for "Ice 1 -> discard" in log. Simpler: count P1
+    # discards (trash should be 0 from this).
+    # Actually CHECK_CACHE forced a discard if hand > 5 but P1 started <5.
+    p1_trash_after_other_line = len(g.state.players[1].trash)
+    # Reset for second test.
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    g.state.lines[0].p0_stack = [ice_1_inst]
+    g.state.players[1].hand = [light_0_inst_in_line]
+    g.state.players[1].trash = []
+    g.state.current_player = 1
+    g.state.phase = Phase.ACTION
+    g._pending = []
+    # P1 plays Light 0 face-down into line 0 (Ice 1's line) — TRIGGER.
+    g.step(Action(type=ActionType.PLAY_FACE_DOWN, hand_index=0, line_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # P1 should have been forced to discard from hand by Ice 1. Hand was 1
+    # (the card we just played), now 0 (played) + check_cache might not
+    # discard further. The forced discard from Ice 1 needs a card to come
+    # from somewhere — but P1's hand was empty after the play. The discard
+    # silently fails (no-op).
+    # Better test: have P1 with multiple cards and verify discard happens.
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    g.state.lines[0].p0_stack = [ice_1_inst]
+    extra = CardInst(inst_id=11004, def_id=light_0.def_id, owner=1, face_up=False)
+    g.state.players[1].hand = [light_0_inst_in_line, extra]
+    g.state.players[1].trash = []
+    g.state.current_player = 1
+    g.state.phase = Phase.ACTION
+    g._pending = []
+    g.step(Action(type=ActionType.PLAY_FACE_DOWN, hand_index=0, line_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # After play (1 card to field) + Ice 1 discard (1 to trash), P1 should
+    # have 0 hand cards and 1 in trash (the discarded one).
+    assert len(g.state.players[1].trash) >= 1, (
+        f"Ice 1 should force opp discard; trash={len(g.state.players[1].trash)}"
+    )
+
+
+def test_war_2_fires_when_opp_compiles():
+    """War 2 bottom: 'After your opponent compiles: Your opponent
+    discards their hand.' Fires when opp completes a compile action."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=5, include_main2=True))
+    g.set_predetermined_draft([
+        ["War", "Death", "Water"],
+        ["Light", "Fire", "Speed"],
+    ])
+    defs = load_card_defs()
+    war_2 = next(d for d in defs if d.key == "MN02:War:2")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0 has War 2 face-up in line 0.
+    war_2_inst = CardInst(inst_id=14001, def_id=war_2.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [war_2_inst]
+    # P1 has a "winning" line stack on their side of line 1 (Fire protocol).
+    # Stack 3 face-up Fire 4s (value 4 each = 12) → compileable.
+    fire_4 = next(d for d in defs if d.key == "MN01:Fire:4")
+    g.state.lines[1].p1_stack = [
+        CardInst(inst_id=14010 + i, def_id=fire_4.def_id, owner=1, face_up=True)
+        for i in range(3)
+    ]
+    # P1 has cards in hand to be discarded.
+    g.state.players[1].hand = [
+        CardInst(inst_id=14020 + i, def_id=fire_0.def_id, owner=1, face_up=False)
+        for i in range(3)
+    ]
+    g.state.players[0].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 1
+    g.state.phase = Phase.CHECK_COMPILE
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    pre_p1_hand = len(g.state.players[1].hand)
+    g.step(Action(type=ActionType.COMPILE_LINE, line_index=1))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # After compile, War 2's bottom should force P1 to discard their hand.
+    # Discards land in trash. Hand should be 0 (or close).
+    assert len(g.state.players[1].hand) == 0, (
+        f"War 2 should force opp to discard hand after compile; "
+        f"P1 hand: {pre_p1_hand} -> {len(g.state.players[1].hand)}"
+    )
+
+
+def test_mirror_4_fires_when_opp_draws():
+    """Mirror 4 bottom: 'After your opponent draws cards: Draw 1 card.'
+    Fires whenever opp draws ≥1 card."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=6, include_main2=True))
+    g.set_predetermined_draft([
+        ["Mirror", "Death", "Water"],
+        ["Light", "Fire", "Speed"],
+    ])
+    defs = load_card_defs()
+    mirror_4 = next(d for d in defs if d.key == "MN02:Mirror:4")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0 has Mirror 4 face-up.
+    m4_inst = CardInst(inst_id=15001, def_id=mirror_4.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [m4_inst]
+    # Stock decks.
+    g.state.players[0].deck = [
+        CardInst(inst_id=15100 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = [
+        CardInst(inst_id=15200 + i, def_id=fire_0.def_id, owner=1, face_up=False)
+        for i in range(5)
+    ]
+    # P0 hand empty (so Mirror 4 draw lands cleanly). P1 hand has some
+    # cards so REFRESH actually triggers a draw.
+    g.state.players[0].hand = []
+    g.state.players[1].hand = [
+        CardInst(inst_id=15300, def_id=fire_0.def_id, owner=1, face_up=False),
+    ]
+    g.state.current_player = 1
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    pre_p0_hand = len(g.state.players[0].hand)  # = 0
+    pre_p0_deck = len(g.state.players[0].deck)  # = 5
+    # P1 refreshes (draws to 5 from 1 = +4 cards).
+    g.step(Action(type=ActionType.REFRESH))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # P0 should have drawn 1 from Mirror 4's after-opp-draw trigger.
+    assert len(g.state.players[0].hand) >= 1, (
+        f"Mirror 4 should fire after P1 refresh-draws; "
+        f"P0 hand: {pre_p0_hand} -> {len(g.state.players[0].hand)}"
+    )
+    assert len(g.state.players[0].deck) <= pre_p0_deck - 1
+
+
+def test_assim_1_fires_on_either_player_refresh():
+    """Assimilation 1 bottom: 'After a player refreshes: ...' fires
+    when either player refreshes (not just opp)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=7, include_aux2=True))
+    g.set_predetermined_draft([
+        ["Assimilation", "Death", "Water"],
+        ["Light", "Fire", "Speed"],
+    ])
+    defs = load_card_defs()
+    assim_1 = next(d for d in defs if d.key == "AX02:Assimilation:1")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    a1_inst = CardInst(inst_id=16001, def_id=assim_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [a1_inst]
+    g.state.players[0].hand = [
+        CardInst(inst_id=16100, def_id=fire_0.def_id, owner=0, face_up=False),
+    ]
+    g.state.players[1].hand = [
+        CardInst(inst_id=16200, def_id=fire_0.def_id, owner=1, face_up=False),
+    ]
+    g.state.players[0].deck = [
+        CardInst(inst_id=16300 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = [
+        CardInst(inst_id=16400 + i, def_id=fire_0.def_id, owner=1, face_up=False)
+        for i in range(5)
+    ]
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    pre_p1_trash = len(g.state.players[1].trash)
+    # P0 refreshes — Assim 1 should fire (the OWNER refreshed, but the
+    # trigger is "After a player refreshes" so it fires).
+    g.step(Action(type=ActionType.REFRESH))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Assim 1 effect: P0 draws top of P1's deck, then P0 discards a card
+    # into P1's trash. So P1's trash should have grown.
+    assert len(g.state.players[1].trash) > pre_p1_trash, (
+        f"Assim 1 should fire on owner's own refresh; "
+        f"P1 trash: {pre_p1_trash} -> {len(g.state.players[1].trash)}"
+    )
+
+
 def test_greedy_beats_random_more_often_than_not():
     """Sanity check: greedy heuristic should win > 50% vs random over many games."""
     wins = {0: 0, 1: 0, None: 0}

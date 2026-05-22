@@ -26,10 +26,16 @@ import {
 import {
   type EffectFn,
   type EffectGen,
+  getAfterAnyRefreshEffect,
   getAfterClearCacheEffect,
+  getAfterOppCompileEffect,
   getAfterOppDiscardEffect,
+  getAfterOppDrawEffect,
+  getAfterOppPlayInLineEffect,
+  getAfterOppRefreshEffect,
   getAfterSelfDeleteEffect,
   getAfterSelfDiscardEffect,
+  getAfterSelfDiscardOnOppTurnEffect,
   getAfterSelfDrawEffect,
   getAfterSelfRefreshEffect,
   getAfterSelfShuffleEffect,
@@ -57,6 +63,7 @@ import {
   playerCanCompile,
   playerMayPlayAnyLineFaceup,
   playerSkipsCheckCache,
+  refreshPlayer,
 } from "./helpers";
 import { createRng, rngFloat, rngShuffle } from "./rng";
 import type {
@@ -601,6 +608,9 @@ export class Game {
     const opp: PlayerIndex = ap === 0 ? 1 : 0;
     const ln = a.lineIndex;
     const line = st.lines[ln];
+    // Flag for `after_opp_compile` broadcast (War 2).
+    const { flagAfterCompile } = require("./helpers");
+    flagAfterCompile(st, ap);
     for (const c of line.p0Stack) { c.faceUp = true; st.players[c.owner].trash.push(c); }
     for (const c of line.p1Stack) { c.faceUp = true; st.players[c.owner].trash.push(c); }
     line.p0Stack = []; line.p1Stack = [];
@@ -626,9 +636,11 @@ export class Game {
     const st = this.state;
     const ap = st.currentPlayer;
     if (a.type === "REFRESH") {
-      const ps = st.players[ap];
-      const need = STARTING_HAND - ps.hand.length;
-      if (need > 0) drawCards(st, ap, need);
+      // Routed through `refreshPlayer` (not raw drawCards) so the
+      // post-refresh event flag is set — otherwise after_self_refresh /
+      // after_opp_refresh / after_any_refresh would never fire on the
+      // player's own REFRESH action.
+      refreshPlayer(st, ap);
       st.phase = "CHECK_CACHE"; return;
     }
     if (a.type === "PLAY_FACE_UP") {
@@ -736,8 +748,11 @@ export class Game {
     // Diversity 6 continuous check (a fresh play may bring its own protocol
     // count up to/keep at 3, but Diversity 6 itself entering a sub-3 field
     // must immediately self-destruct).
-    const { checkDiversity6SelfDestruct } = require("./helpers");
+    const { checkDiversity6SelfDestruct, flagAfterPlayInLine } = require("./helpers");
     checkDiversity6SelfDestruct(st);
+    // Flag the play for `after_opp_play_in_line` triggers (Ice 1).
+    // Attributed to the ACTOR (`player`), broadcast targets `1 - player`.
+    flagAfterPlayInLine(st, player, actualLine);
   }
 
   private doClearCache(a: Action): void {
@@ -769,6 +784,21 @@ export class Game {
     return pushed;
   }
 
+  private broadcastForSideInLine(
+    owner: PlayerIndex,
+    line: number,
+    getter: (defId: number) => EffectFn | null,
+  ): boolean {
+    const st = this.state;
+    let pushed = false;
+    for (const c of [...lineStack(st.lines[line], owner)]) {
+      if (!c.faceUp || c.defId === -1) continue;
+      const fn = getter(c.defId);
+      if (fn) { this.pushEffect(fn(st, owner, line, c)); pushed = true; }
+    }
+    return pushed;
+  }
+
   private broadcastAfterClearCache(owner: PlayerIndex): boolean {
     return this.broadcastForSide(owner, getAfterClearCacheEffect);
   }
@@ -783,6 +813,9 @@ export class Game {
         delete scratch[dk];
         pushedAny = this.broadcastForSide(p, getAfterSelfDiscardEffect) || pushedAny;
         pushedAny = this.broadcastForSide((1 - p) as PlayerIndex, getAfterOppDiscardEffect) || pushedAny;
+        if (st.currentPlayer !== p) {
+          pushedAny = this.broadcastForSide(p, getAfterSelfDiscardOnOppTurnEffect) || pushedAny;
+        }
       }
     }
     for (const p of [0, 1] as PlayerIndex[]) {
@@ -790,6 +823,7 @@ export class Game {
       if (scratch[dk]) {
         delete scratch[dk];
         pushedAny = this.broadcastForSide(p, getAfterSelfDrawEffect) || pushedAny;
+        pushedAny = this.broadcastForSide((1 - p) as PlayerIndex, getAfterOppDrawEffect) || pushedAny;
       }
     }
     for (const p of [0, 1] as PlayerIndex[]) {
@@ -811,6 +845,25 @@ export class Game {
       if (scratch[dk]) {
         delete scratch[dk];
         pushedAny = this.broadcastForSide(p, getAfterSelfRefreshEffect) || pushedAny;
+        pushedAny = this.broadcastForSide((1 - p) as PlayerIndex, getAfterOppRefreshEffect) || pushedAny;
+        pushedAny = this.broadcastForSide(p, getAfterAnyRefreshEffect) || pushedAny;
+        pushedAny = this.broadcastForSide((1 - p) as PlayerIndex, getAfterAnyRefreshEffect) || pushedAny;
+      }
+    }
+    for (const p of [0, 1] as PlayerIndex[]) {
+      const dk = `_pending_after_compile_by_p${p}`;
+      if (scratch[dk]) {
+        delete scratch[dk];
+        pushedAny = this.broadcastForSide((1 - p) as PlayerIndex, getAfterOppCompileEffect) || pushedAny;
+      }
+    }
+    const playList = scratch["_pending_after_play_list"] as [PlayerIndex, number][] | undefined;
+    if (playList && playList.length > 0) {
+      delete scratch["_pending_after_play_list"];
+      for (const [actor, ln] of playList) {
+        pushedAny = this.broadcastForSideInLine(
+          (1 - actor) as PlayerIndex, ln, getAfterOppPlayInLineEffect,
+        ) || pushedAny;
       }
     }
     const flips = scratch["_pending_flip_cards"] as CardInst[] | undefined;

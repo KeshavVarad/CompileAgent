@@ -148,6 +148,15 @@ function flagAfterShuffle(state: GameState, player: PlayerIndex): void {
 export function flagAfterRefresh(state: GameState, player: PlayerIndex): void {
   (state.scratch as Record<string, unknown>)[`_pending_after_refresh_by_p${player}`] = true;
 }
+export function flagAfterCompile(state: GameState, player: PlayerIndex): void {
+  (state.scratch as Record<string, unknown>)[`_pending_after_compile_by_p${player}`] = true;
+}
+export function flagAfterPlayInLine(state: GameState, player: PlayerIndex, line: number): void {
+  // List of (player_who_played, line) so multiple plays within a single
+  // effect chain each get their own broadcast.
+  const lst = ((state.scratch as Record<string, unknown>)["_pending_after_play_list"] ??= []) as [PlayerIndex, number][];
+  lst.push([player, line]);
+}
 function flagFlip(state: GameState, card: CardInst): void {
   const lst = ((state.scratch as Record<string, unknown>)["_pending_flip_cards"] ??= []) as CardInst[];
   lst.push(card);

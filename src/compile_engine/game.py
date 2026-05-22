@@ -581,10 +581,14 @@ class Game:
             yield  # marks this as a generator
 
     def _compile_finalize(self, action: Action) -> None:
+        from .effects import _flag_after_compile
         st = self.state
         ap = st.current_player
         ln = action.line_index
         opp = 1 - ap
+        # Flag for `after_opp_compile` broadcast (War 2). Fired here at the
+        # end of compile-finalize so all cleanup (trash, recompile) is done.
+        _flag_after_compile(st, ap)
         # Delete all remaining cards on both sides in this line. Cards that
         # shifted out via a when_deleted_by_compile interrupt (Speed 2) are
         # no longer in the line and survive.
@@ -663,10 +667,13 @@ class Game:
         self._play_card(player, hand_index, line_index, face_up=face_up)
 
     def _do_refresh(self, player: int) -> None:
-        ps = self.state.players[player]
-        need = STARTING_HAND - len(ps.hand)
-        if need > 0:
-            draw_cards(self.state, player, need)
+        # Routed through `refresh_player` (not raw draw_cards) so the
+        # post-refresh event flag is set — otherwise `@after_self_refresh`
+        # / `@after_opp_refresh` / `@after_any_refresh` would never fire
+        # for the player's own REFRESH action (only when card effects
+        # trigger a refresh).
+        from .effects import refresh_player
+        refresh_player(self.state, player)
 
     def _play_card(self, player: int, hand_index: int, line_index: int, face_up: bool) -> None:
         """Per Compile Codex (16 Dec 2024): the played card is committed
@@ -755,8 +762,14 @@ class Game:
         # Diversity 6 continuous check — placing a card may not change the
         # protocol count (it can only stay the same or grow), but Diversity 6
         # itself can enter a sub-3-protocol field and must self-delete.
-        from .effects import _check_diversity_6_self_destruct
+        from .effects import _check_diversity_6_self_destruct, _flag_after_play_in_line
         _check_diversity_6_self_destruct(st)
+        # Flag the play for `after_opp_play_in_line` triggers (Ice 1).
+        # Attributed to the ACTOR (`player`) — the trigger asks "did your
+        # opp play here?", so the broadcast targets the actor's opp.
+        # `actual_line` is the placement line, which is also "this line"
+        # for any face-up cards there.
+        _flag_after_play_in_line(st, player, actual_line)
 
     def _push_effect(self, gen) -> None:
         """Push an effect generator if under per-turn depth and total caps.
@@ -929,6 +942,21 @@ class Game:
                     pushed = True
         return pushed
 
+    def _broadcast_for_side_in_line(self, owner: int, line: int, getter) -> bool:
+        """Like `_broadcast_for_side` but only iterates one line. Used for
+        line-scoped triggers like `after_opp_play_in_line` (Ice 1)."""
+        st = self.state
+        pushed = False
+        for c in list(st.lines[line].stack(owner)):
+            if not c.face_up:
+                continue
+            d = st.defs[c.def_id]
+            fn = getter(d)
+            if fn is not None:
+                self._push_effect(fn(st, owner, line, c))
+                pushed = True
+        return pushed
+
     def _drain_pending_after_events(self) -> bool:
         """Check for deferred "after X" event flags set by atomic helpers
         in effects.py. For each flag, broadcast the corresponding effects
@@ -938,26 +966,36 @@ class Game:
         if any effect was pushed (caller should drain again)."""
         from .effects import (
             get_after_self_discard_effect, get_after_opp_discard_effect,
+            get_after_self_discard_on_opp_turn_effect,
             get_after_self_delete_effect, get_after_self_draw_effect,
+            get_after_opp_draw_effect,
             get_after_self_shuffle_effect, get_after_self_refresh_effect,
+            get_after_opp_refresh_effect, get_after_any_refresh_effect,
+            get_after_opp_compile_effect,
+            get_after_opp_play_in_line_effect,
             get_flip_trigger_effect,
         )
         st = self.state
         pushed_any = False
 
         # Discards: one flag per discarder. Fire that player's own
-        # `after_self_discard` plus the opponent's `after_opp_discard`.
+        # `after_self_discard` plus the opponent's `after_opp_discard`. If
+        # the discard happened during the opp's turn (current_player != p),
+        # also fire the discarder's `after_self_discard_on_opp_turn`.
         for p in (0, 1):
             key = f"_pending_after_discard_by_p{p}"
             if st.scratch.pop(key, False):
                 pushed_any |= self._broadcast_for_side(p, get_after_self_discard_effect)
                 pushed_any |= self._broadcast_for_side(1 - p, get_after_opp_discard_effect)
+                if st.current_player != p:
+                    pushed_any |= self._broadcast_for_side(p, get_after_self_discard_on_opp_turn_effect)
 
-        # Draws — only the drawer's side fires `after_self_draw`.
+        # Draws — drawer fires `after_self_draw`, opp fires `after_opp_draw`.
         for p in (0, 1):
             key = f"_pending_after_draw_by_p{p}"
             if st.scratch.pop(key, False):
                 pushed_any |= self._broadcast_for_side(p, get_after_self_draw_effect)
+                pushed_any |= self._broadcast_for_side(1 - p, get_after_opp_draw_effect)
 
         # Deletes — attributed to whoever was current_player at the time.
         for p in (0, 1):
@@ -971,11 +1009,30 @@ class Game:
             if st.scratch.pop(key, False):
                 pushed_any |= self._broadcast_for_side(p, get_after_self_shuffle_effect)
 
-        # Refresh — fires on refresher's side.
+        # Refresh — refresher fires `after_self_refresh`, opp fires
+        # `after_opp_refresh`, and both sides fire `after_any_refresh`.
         for p in (0, 1):
             key = f"_pending_after_refresh_by_p{p}"
             if st.scratch.pop(key, False):
                 pushed_any |= self._broadcast_for_side(p, get_after_self_refresh_effect)
+                pushed_any |= self._broadcast_for_side(1 - p, get_after_opp_refresh_effect)
+                pushed_any |= self._broadcast_for_side(p, get_after_any_refresh_effect)
+                pushed_any |= self._broadcast_for_side(1 - p, get_after_any_refresh_effect)
+
+        # Compile — opp fires `after_opp_compile` (War 2).
+        for p in (0, 1):
+            key = f"_pending_after_compile_by_p{p}"
+            if st.scratch.pop(key, False):
+                pushed_any |= self._broadcast_for_side(1 - p, get_after_opp_compile_effect)
+
+        # Plays — for each (actor, line) where a card was placed, fire
+        # `after_opp_play_in_line` on opp-of-actor's side IN THAT LINE.
+        play_list = st.scratch.pop("_pending_after_play_list", None)
+        if play_list:
+            for actor, ln in play_list:
+                pushed_any |= self._broadcast_for_side_in_line(
+                    1 - actor, ln, get_after_opp_play_in_line_effect
+                )
 
         # Flip triggers — list of card refs (the cards that flipped).
         flip_list = st.scratch.pop("_pending_flip_cards", None)
