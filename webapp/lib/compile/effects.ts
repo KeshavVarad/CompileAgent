@@ -469,6 +469,19 @@ register(MIDDLE_EFFECTS, "MN01:Death:0", function* (state, ap, li) {
   }
 });
 
+// Psychic 1 bottom: "Start: Flip this card." Bottom-tier effects only
+// resolve while uncovered (Codex), so covering Psychic 1 keeps the top
+// "opp must play face-down" persistent effect active indefinitely.
+// Mirrors src/compile_engine/effects.py.
+register(START_EFFECTS, "MN01:Psychic:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
+  // Flip face-down — deactivates the top lockout. No trigger pushed
+  // since this is a deactivation, not an on-flip-up event.
+  card.faceUp = false;
+  if (false) yield {} as Choice;
+});
+
 register(START_EFFECTS, "MN01:Death:1", function* (state, ap, li, card) {
   // Errata: "Start: You may draw 1 card. If you do, delete 1 other card. Then, delete this card."
   const deckHas = state.players[ap].deck.length > 0 || state.players[ap].trash.length > 0;
@@ -747,7 +760,11 @@ register(MIDDLE_EFFECTS, "MN01:Light:0", function* (state, ap, li, card) {
   drawCards(state, ap, v);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN01:Light:1", function* (state, ap) {
+// Light 1 bottom — "End: Draw 1 card." Bottom-tier End: only fires
+// while the card is face-up + uncovered.
+register(END_EFFECTS, "MN01:Light:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -1251,7 +1268,12 @@ register(MIDDLE_EFFECTS, "MN02:Chaos:0", function* (state, ap) {
   }
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Chaos:0", function* (state, ap) {
+// Chaos 0 bottom — "Start: Draw the top card of your opponent's deck.
+// Your opponent draws the top card of your deck." Fires only while
+// uncovered.
+register(START_EFFECTS, "MN02:Chaos:0", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   bothPlayersDrawTop(state, ap);
   if (false) yield {} as Choice;
 });
@@ -1294,7 +1316,11 @@ register(MIDDLE_EFFECTS, "MN02:Chaos:2", function* (state, ap, li, card) {
   if (dest[didx] != null) shiftCard(state, targets[i].line, targets[i].player, targets[i].pos, dest[didx]);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Chaos:4", function* (state, ap) {
+// Chaos 4 bottom — "End: Discard your hand. Draw that many cards."
+// Fires only while uncovered.
+register(END_EFFECTS, "MN02:Chaos:4", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const n = state.players[ap].hand.length;
   while (state.players[ap].hand.length > 0) discardToTrash(state, ap, 0);
   drawCards(state, ap, n);
@@ -1544,7 +1570,11 @@ register(MIDDLE_EFFECTS, "MN02:Courage:0", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Courage:0", function* (state, ap) {
+// Courage 0 bottom — "End: You may discard 1 card. If you do, your
+// opponent discards 1 card." Fires only while uncovered.
+register(END_EFFECTS, "MN02:Courage:0", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   if (state.players[ap].hand.length === 0) return;
   const idx: number = yield {
     prompt: "(optional) Discard 1 → opp discards 1?",
@@ -1573,14 +1603,22 @@ register(MIDDLE_EFFECTS, "MN02:Courage:1", function* (state, ap) {
   if (i != null && targets[i]) deleteCardFromField(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Courage:2", function* (state, ap, li) {
+// Courage 2 bottom — "End: If opp has higher total value in this line,
+// draw 1 card." Fires only while uncovered.
+register(END_EFFECTS, "MN02:Courage:2", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const { computeLineValue } = require("./helpers");
   if (computeLineValue(state, li, opp) > computeLineValue(state, li, ap)) drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Courage:3", function* (state, ap, li, card) {
+// Courage 3 bottom — "End: You may shift this card to the line where
+// opp has their highest total value." Fires only while uncovered.
+register(END_EFFECTS, "MN02:Courage:3", function* (state, ap, li, card) {
+  const stack0 = lineStack(state.lines[li], ap);
+  if (stack0.length === 0 || stack0[stack0.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const { computeLineValue } = require("./helpers");
   let best = 0;
@@ -1876,7 +1914,11 @@ register(MIDDLE_EFFECTS, "MN02:Luck:4", function* (state, ap, li, card) {
 
 // ----- MN02: Mirror --------------------------------------------------------
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Mirror:1", function* (state, ap, li, card) {
+// Mirror 1 bottom — "End: You may resolve the middle command of 1 of
+// opp's cards as if it were on this card." Fires only while uncovered.
+register(END_EFFECTS, "MN02:Mirror:1", function* (state, ap, li, card) {
+  const ownStack = lineStack(state.lines[li], ap);
+  if (ownStack.length === 0 || ownStack[ownStack.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const targets: FieldTarget[] = [];
   for (let ln = 0; ln < 3; ln++) {
@@ -1943,7 +1985,11 @@ register(MIDDLE_EFFECTS, "MN02:Peace:1", function* (state) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Peace:1", function* (state, ap) {
+// Peace 1 bottom — "End: If your hand is empty, draw 1 card." Fires
+// only while uncovered.
+register(END_EFFECTS, "MN02:Peace:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   if (state.players[ap].hand.length === 0) drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -2286,7 +2332,12 @@ register(MIDDLE_EFFECTS, "MN02:War:3", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:War:3", function* (state, ap) {
+// War 3 bottom — "After your opponent discards cards: You may play 1
+// card face-down." Fires only while uncovered. `ap` here is the card
+// owner (broadcast targets the opp-of-discarder side).
+register(AFTER_OPP_DISCARD_EFFECTS, "MN02:War:3", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const hand = state.players[ap].hand;
   if (hand.length === 0) return;
   const opts = hand.map((_, i) => describeHandCard(state, ap, i));

@@ -394,9 +394,11 @@ def test_spirit_3_shift_self_when_covered_executes():
 
 def test_speed_0_recursive_play_fires_played_card_effect():
     """Speed 0 middle: 'Play 1 card.' The recursively played card must
-    resolve its own effects (e.g. drawing). We force a play of Light 1
-    face-up (whose bottom 'Draw 1 card.' fires on play) and assert the
-    drawn-card count increased."""
+    resolve its own effects (e.g. drawing). We force a play of Light 2
+    face-up (whose middle 'Draw 2 cards. Reveal 1 face-down card...'
+    draws on play; the reveal-prompt is auto-skipped when no face-down
+    cards exist in the field) and assert the drawn-card count
+    increased."""
     from compile_engine import Game, GameConfig
     from compile_engine.actions import Action, ActionType
     from compile_engine.cards import load_card_defs
@@ -408,17 +410,17 @@ def test_speed_0_recursive_play_fires_played_card_effect():
     ])
     defs = load_card_defs()
     speed_0 = next(d for d in defs if d.key == "MN01:Speed:0")
-    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    light_2 = next(d for d in defs if d.key == "MN01:Light:2")
 
     # Clear and set up a controlled scenario.
     g.state.players[0].hand = []
     g.state.players[1].hand = []
     g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
 
-    # P0 holds Speed 0 + Light 1 in hand. P0's lines have Speed at idx 0, Light at idx 1.
+    # P0 holds Speed 0 + Light 2 in hand. P0's lines have Speed at idx 0, Light at idx 1.
     speed_0_inst = CardInst(inst_id=2001, def_id=speed_0.def_id, owner=0, face_up=False)
-    light_1_inst = CardInst(inst_id=2002, def_id=light_1.def_id, owner=0, face_up=False)
-    g.state.players[0].hand = [speed_0_inst, light_1_inst]
+    light_2_inst = CardInst(inst_id=2002, def_id=light_2.def_id, owner=0, face_up=False)
+    g.state.players[0].hand = [speed_0_inst, light_2_inst]
     # Stock the deck with a few dummies so draw works.
     fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
     g.state.players[0].deck = [
@@ -430,43 +432,83 @@ def test_speed_0_recursive_play_fires_played_card_effect():
     g.state.scratch["_engine"] = g  # ensure callback ref is live
     g._pending = []
 
-    pre_hand_len = len(g.state.players[0].hand)  # = 2
     pre_deck_len = len(g.state.players[0].deck)  # = 5
 
     # Play Speed 0 face-up into line 0 (Speed protocol).
     g.step(Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0))
 
     # Speed 0's middle asks us to play one of the legal sub-plays. Pick the
-    # one that plays Light 1 face-up into line 1 (Light protocol). After this,
-    # Light 1's bottom 'Draw 1 card.' should also fire.
+    # one that plays Light 2 face-up into line 1 (Light protocol). After this,
+    # Light 2's middle 'Draw 2 cards.' should also fire.
     while not g.is_over():
-        legal = g.legal_actions()
-        # Find a CHOOSE_TARGET action whose label corresponds to Light 1 FU L1.
         choice_obj = g._pending[-1].last_choice if g._pending else None
         if choice_obj is None:
             break
         picked = None
         for i, opt in enumerate(choice_obj.options):
-            if "Light1" in opt and "L1" in opt and opt.startswith("FU"):
+            if "Light2" in opt and "L1" in opt and opt.startswith("FU"):
                 picked = i
                 break
         if picked is None:
-            # If we lost the prompt, abort.
             break
         g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=picked))
         break
 
-    # We should have: hand = 0 (played both), Light 1 in line 1 face-up,
-    # and drew 1 from Light 1's bottom effect.
+    # We should have: Light 2 in line 1 face-up, and drew 2 from Light 2's middle.
     line1_top = g.state.lines[1].p0_stack[-1] if g.state.lines[1].p0_stack else None
-    assert line1_top is not None and line1_top is light_1_inst, "Light 1 not in line 1 face-up"
+    assert line1_top is not None and line1_top is light_2_inst, "Light 2 not in line 1 face-up"
     assert line1_top.face_up
-    # Hand size: started at 2, played 2 → 0 then +1 draw → 1
-    assert len(g.state.players[0].hand) == 1, (
-        f"expected 1 card after sub-play+draw, got {len(g.state.players[0].hand)}"
+    # Hand size: started at 2, played 2 → 0 then +2 draws → 2
+    assert len(g.state.players[0].hand) == 2, (
+        f"expected 2 cards after sub-play+draw, got {len(g.state.players[0].hand)}"
     )
-    # Deck count dropped by 1 (the drawn card).
-    assert len(g.state.players[0].deck) == pre_deck_len - 1
+    # Deck count dropped by 2 (the drawn cards).
+    assert len(g.state.players[0].deck) == pre_deck_len - 2
+
+
+def test_light_1_bottom_end_trigger_fires_at_end_phase_not_on_play():
+    """Light 1 bottom: 'End: Draw 1 card.' Bottom-tier End: triggers
+    fire on the owner's End step while the card is face-up + uncovered
+    — NOT when the card is played (regression: previously routed via
+    @bottom_on_play and fired immediately on play)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=3))
+    g.set_predetermined_draft([
+        ["Light", "Fire", "Speed"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    light_1_inst = CardInst(inst_id=8001, def_id=light_1.def_id, owner=0, face_up=False)
+    g.state.players[0].hand = [light_1_inst]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=9000 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    pre_deck = len(g.state.players[0].deck)
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Play Light 1 face-up into line 0 (Light protocol). On play the
+    # bottom End trigger should NOT fire — only middle/bottom-first/top
+    # immediate effects do.
+    g.step(Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # play advances through CHECK_CACHE → END → opp turn. End fires
+    # exactly once on P0's turn, drawing 1 card from deck → hand.
+    assert len(g.state.players[0].deck) == pre_deck - 1, (
+        f"Light 1 End: should fire once at end of P0's turn; "
+        f"deck went {pre_deck} → {len(g.state.players[0].deck)}"
+    )
+    assert len(g.state.players[0].hand) == 1, "expected 1 drawn card in hand"
 
 
 def test_errata_text_loaded():

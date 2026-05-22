@@ -845,17 +845,20 @@ export class Game {
   private doEndPhase(): boolean {
     const st = this.state;
     const ap = st.currentPlayer;
-    let anyPushed = false;
-    for (let ln = 0; ln < NUM_LINES; ln++) {
-      const snapshot = [...lineStack(st.lines[ln], ap)];
-      for (const c of snapshot) {
-        if (!c.faceUp) continue;
-        const fn = getEndEffect(c.defId);
-        if (fn) { this.pushEffect(fn(st, ap, ln, c)); anyPushed = true; }
+    // End effects fire once per turn — gated by `end_resolved` so the
+    // re-entry (after the drain) does not re-fire them. (See py
+    // _do_end_phase for the matching logic.)
+    if (!st.scratch["end_resolved"]) {
+      let anyPushed = false;
+      for (let ln = 0; ln < NUM_LINES; ln++) {
+        const snapshot = [...lineStack(st.lines[ln], ap)];
+        for (const c of snapshot) {
+          if (!c.faceUp) continue;
+          const fn = getEndEffect(c.defId);
+          if (fn) { this.pushEffect(fn(st, ap, ln, c)); anyPushed = true; }
+        }
       }
-    }
-    if (anyPushed) {
-      if (!st.scratch["end_resolved"]) {
+      if (anyPushed) {
         st.scratch["end_resolved"] = true;
         return true;
       }
