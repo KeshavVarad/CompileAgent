@@ -217,6 +217,7 @@ export class Game {
     // playCard trusts the recorder's revealedDefId at submission time.
     const recordMode = (st.config.mode ?? "play") === "record";
 
+    const { unityCardMayBePlayedFaceupInLine } = require("./helpers");
     for (let hi = 0; hi < ps.hand.length; hi++) {
       const c = ps.hand[hi];
       const d = c.defId === -1 ? null : CARD_DEFS[c.defId];
@@ -226,7 +227,8 @@ export class Game {
       for (let ln = 0; ln < NUM_LINES; ln++) {
         if (lineBlocked[ln] && !recordMode) continue;
         if (psychic1Forces && !recordMode) continue;
-        if (unrestrictedFu || (d != null && ps.protocols[ln] === d.protocol)) {
+        const unity1InLine = d != null && unityCardMayBePlayedFaceupInLine(st, ap, ln, d.protocol);
+        if (unrestrictedFu || (d != null && ps.protocols[ln] === d.protocol) || unity1InLine) {
           actions.push({ type: "PLAY_FACE_UP", handIndex: hi, lineIndex: ln });
         }
       }
@@ -244,14 +246,18 @@ export class Game {
       }
     }
 
-    // Spirit 3 only — Speed 2's "shift even if covered" is a targetability
-    // modifier (other shift effects can target it), not a standalone action.
+    // Spirit 3 ("you may shift this card, even if covered") + Unity 1
+    // covered ("if this card is covered, you may shift this card"). Speed
+    // 2 is a targetability modifier (other shift effects can target it),
+    // not a standalone action.
     for (let lnSrc = 0; lnSrc < NUM_LINES; lnSrc++) {
       const stack = lineStack(st.lines[lnSrc], ap);
       stack.forEach((c, pos) => {
         if (!c.faceUp) return;
         const d = CARD_DEFS[c.defId];
-        if (!(d.protocol === "Spirit" && d.value === 3)) return;
+        const isSpirit3 = d.protocol === "Spirit" && d.value === 3;
+        const isUnity1Covered = d.protocol === "Unity" && d.value === 1 && pos < stack.length - 1;
+        if (!(isSpirit3 || isUnity1Covered)) return;
         for (let lnDst = 0; lnDst < NUM_LINES; lnDst++) {
           if (lnDst === lnSrc) continue;
           actions.push({ type: "SHIFT_OWN_CARD", lineIndex: lnSrc, handIndex: pos, choiceIndex: lnDst });
@@ -685,15 +691,18 @@ export class Game {
       st.phase = "CHECK_CACHE"; return;
     }
     if (a.type === "SHIFT_OWN_CARD") {
-      // Spirit 3 affordance only.
+      // Spirit 3 (covered or uncovered) or Unity 1 (covered only) affordance.
       const srcLine = a.lineIndex!;
       const srcPos = a.handIndex!;
       const dstLine = a.choiceIndex!;
       const stack = lineStack(st.lines[srcLine], ap);
       const c = stack[srcPos];
       const d = c.defId === -1 ? null : CARD_DEFS[c.defId];
-      const valid = c.faceUp && d != null && d.protocol === "Spirit" && d.value === 3;
-      if (!valid) throw new Error("invalid SHIFT_OWN_CARD target");
+      const isSpirit3 = c.faceUp && d != null && d.protocol === "Spirit" && d.value === 3;
+      const isUnity1Covered = c.faceUp && d != null && d.protocol === "Unity" && d.value === 1 && srcPos < stack.length - 1;
+      if (!(isSpirit3 || isUnity1Covered)) {
+        throw new Error("invalid SHIFT_OWN_CARD target (need face-up Spirit 3, or covered face-up Unity 1)");
+      }
       const { shiftCard } = require("./helpers");
       shiftCard(st, srcLine, ap, srcPos, dstLine);
       st.phase = "CHECK_CACHE"; return;
@@ -730,9 +739,11 @@ export class Game {
       actualLine = lineIndex - NUM_LINES;
     }
     if (faceUp && d != null) {
+      const { unityCardMayBePlayedFaceupInLine } = require("./helpers");
       const chaos3Self = d.protocol === "Chaos" && d.value === 3;
       const corruption0Self = d.protocol === "Corruption" && d.value === 0;
       const targetProtos = st.players[targetSide].protocols;
+      const unity1InLine = unityCardMayBePlayedFaceupInLine(st, targetSide, actualLine, d.protocol);
       // Record mode is a transcription of a real game — the recorder is
       // asserting they saw the play happen, possibly enabled by an effect
       // the engine doesn't fully reason about (e.g. opp's Spirit 1 at a
@@ -743,7 +754,7 @@ export class Game {
         recordTrust ||
         targetProtos[actualLine] === d.protocol ||
         playerMayPlayAnyLineFaceup(st, player) ||
-        chaos3Self || corruption0Self;
+        chaos3Self || corruption0Self || unity1InLine;
       if (!ok) throw new Error(`face-up ${d.protocol} must match line protocol`);
       c.faceUp = true;
     } else {

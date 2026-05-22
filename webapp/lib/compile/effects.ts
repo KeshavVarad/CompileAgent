@@ -2684,6 +2684,172 @@ register(MIDDLE_EFFECTS, "AX02:Unity:3", function* (state, ap, li, card) {
   if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
+// ----- AX02: Assimilation 0 / 2, Diversity 1 / 4, Unity 1 / 2 / 4 ----------
+// (Diversity 3 top + Unity 1 top + Unity 1 bottom + Ice 4 bottom are
+// passive — see computeLineValue, isShiftTargetableWhileCovered,
+// unityCardMayBePlayedFaceupInLine, and flipCard respectively.)
+
+function distinctProtocolsInLine(state: GameState, lineIdx: number): number {
+  const protos = new Set<string>();
+  for (const pl of [0, 1] as PlayerIndex[]) {
+    for (const c of lineStack(state.lines[lineIdx], pl)) {
+      if (c.faceUp) protos.add(CARD_DEFS[c.defId].protocol);
+    }
+  }
+  return protos.size;
+}
+
+function distinctProtocolsInField(state: GameState): number {
+  const protos = new Set<string>();
+  for (let ln = 0; ln < 3; ln++) {
+    for (const pl of [0, 1] as PlayerIndex[]) {
+      for (const c of lineStack(state.lines[ln], pl)) {
+        if (c.faceUp) protos.add(CARD_DEFS[c.defId].protocol);
+      }
+    }
+  }
+  return protos.size;
+}
+
+register(MIDDLE_EFFECTS, "AX02:Assimilation:0", function* (state, ap) {
+  // M: Put one of your opponent's covered or uncovered field cards
+  // directly into your hand. "covered or uncovered" overrides the
+  // default uncovered-only targeting (Codex p.3).
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const targets: FieldTarget[] = [];
+  for (let ln = 0; ln < 3; ln++) {
+    const s = lineStack(state.lines[ln], opp);
+    s.forEach((c, pos) => {
+      if (c.isCommitted) return;
+      targets.push({ line: ln, player: opp, pos, card: c });
+    });
+  }
+  if (targets.length === 0) return;
+  yield* chooseFieldTarget("Steal 1 opp field card into your hand", targets, state, ap);
+  const i = state.scratch["_last_target_idx"] as number | undefined;
+  if (i == null || !targets[i]) return;
+  const t = targets[i];
+  const srcStack = lineStack(state.lines[t.line], t.player);
+  const wasTop = t.pos === srcStack.length - 1;
+  srcStack.splice(t.pos, 1);
+  t.card.owner = ap;
+  t.card.faceUp = false;
+  state.players[ap].hand.push(t.card);
+  if (wasTop && srcStack.length && srcStack[srcStack.length - 1].faceUp) {
+    state.triggers.push({ kind: "uncover", line: t.line, player: t.player, card: srcStack[srcStack.length - 1] });
+  }
+  checkDiversity6SelfDestruct(state);
+});
+
+register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Assimilation:2", function* (state, ap, li) {
+  // B: Play the top card of your opponent's deck face down in this stack.
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const psOpp = state.players[opp];
+  if (psOpp.deck.length === 0 && psOpp.trash.length > 0) {
+    psOpp.deck = psOpp.trash; psOpp.trash = [];
+    const rng = { state: state.rngState };
+    const { rngShuffle } = require("./rng");
+    rngShuffle(rng, psOpp.deck);
+    state.rngState = rng.state;
+  }
+  if (psOpp.deck.length === 0) return;
+  const c = psOpp.deck.pop()!;
+  c.owner = ap;
+  c.faceUp = false;
+  lineStack(state.lines[li], ap).push(c);
+  if (false) yield {} as Choice;
+});
+
+register(MIDDLE_EFFECTS, "AX02:Diversity:1", function* (state, ap, li, card) {
+  // M: Shift 1 uncovered card, then draw N (= distinct face-up
+  // protocols on cards in this line).
+  const targets = enumerateUncovered(state, { exclude: card, activePlayer: ap });
+  if (targets.length > 0) {
+    yield* chooseFieldTarget("Shift 1 uncovered card", targets, state, ap);
+    const i = state.scratch["_last_target_idx"] as number | undefined;
+    if (i != null && targets[i]) {
+      const t = targets[i];
+      const dests = [0, 1, 2].filter((l) => l !== t.line);
+      const didx: number = yield {
+        prompt: "To which line?",
+        options: dests.map(String), targets: dests,
+        optional: false, decider: ap,
+      };
+      if (didx >= 0 && didx < dests.length) {
+        shiftCard(state, t.line, t.player, t.pos, dests[didx]);
+      }
+    }
+  }
+  const n = distinctProtocolsInLine(state, li);
+  if (n > 0) drawCards(state, ap, n);
+});
+
+register(MIDDLE_EFFECTS, "AX02:Diversity:4", function* (state, ap, li, card) {
+  // M: Flip 1 uncovered card with a value less than the number of
+  // different protocols on face-up cards in the field.
+  const threshold = distinctProtocolsInField(state);
+  if (threshold <= 0) return;
+  const all = enumerateUncovered(state, { exclude: card, activePlayer: ap });
+  const targets = all.filter((t) => {
+    const v = t.card.faceUp ? CARD_DEFS[t.card.defId].value : FACE_DOWN_BASE_VALUE;
+    return v < threshold;
+  });
+  if (targets.length === 0) return;
+  yield* chooseFieldTarget(`Flip 1 uncovered card with value < ${threshold}`, targets, state, ap);
+  const i = state.scratch["_last_target_idx"] as number | undefined;
+  if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
+});
+
+register(MIDDLE_EFFECTS, "AX02:Unity:1", function* (state, ap) {
+  // M: If there are 5 or more Unity cards in the field, flip the Unity
+  // protocol to the compiled side and delete all cards in that line.
+  if (countUnityInField(state) < 5) return;
+  const ps = state.players[ap];
+  const unityLine = ps.protocols.findIndex((p) => p === "Unity");
+  if (unityLine < 0) return;
+  ps.compiled[unityLine] = true;
+  for (const pl of [0, 1] as PlayerIndex[]) {
+    const stack = lineStack(state.lines[unityLine], pl);
+    for (const c of stack) {
+      c.faceUp = true;
+      state.players[c.owner].trash.push(c);
+    }
+    if (pl === 0) state.lines[unityLine].p0Stack = [];
+    else state.lines[unityLine].p1Stack = [];
+  }
+  checkDiversity6SelfDestruct(state);
+  if (false) yield {} as Choice;
+});
+
+register(MIDDLE_EFFECTS, "AX02:Unity:2", function* (state, ap) {
+  // M: Draw cards equal to the number of Unity cards in the field.
+  const n = countUnityInField(state);
+  if (n > 0) drawCards(state, ap, n);
+  if (false) yield {} as Choice;
+});
+
+register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Unity:4", function* (state, ap) {
+  // B: If your hand is empty, reveal your deck, draw all Unity cards
+  // from it, then shuffle your deck.
+  if (state.players[ap].hand.length > 0) return;
+  const ps = state.players[ap];
+  const unityCards = ps.deck.filter((c) => CARD_DEFS[c.defId].protocol === "Unity");
+  if (unityCards.length === 0) return;
+  logInfo(state, `P${ap + 1} revealed deck: drew ${unityCards.length} Unity card(s)`);
+  for (const c of unityCards) {
+    const idx = ps.deck.indexOf(c);
+    if (idx >= 0) ps.deck.splice(idx, 1);
+    ps.hand.push(c);
+  }
+  const rng = { state: state.rngState };
+  const { rngShuffle } = require("./rng");
+  const { flagAfterShuffle } = require("./helpers");
+  rngShuffle(rng, ps.deck);
+  state.rngState = rng.state;
+  flagAfterShuffle(state, ap);
+  if (false) yield {} as Choice;
+});
+
 // ---------------------------------------------------------------------------
 // Sentinels
 // ---------------------------------------------------------------------------

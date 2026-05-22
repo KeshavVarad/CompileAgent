@@ -244,6 +244,7 @@ class Game:
         line_facedown_blocked = [
             opp_play_facedown_blocked_in_line(st, ln, ap) for ln in range(NUM_LINES)
         ]
+        from .effects import unity_card_may_be_played_faceup_in_line
         for hi, c in enumerate(ps.hand):
             d = st.defs[c.def_id]
             # Chaos 3 bottom: "This card may be played without matching protocols."
@@ -258,7 +259,10 @@ class Game:
                     continue
                 if psychic_1_forces_facedown:
                     continue
-                if unrestricted_faceup or ps.protocols[ln] == d.protocol:
+                unity_1_in_line = unity_card_may_be_played_faceup_in_line(
+                    st, ap, ln, d.protocol
+                )
+                if unrestricted_faceup or ps.protocols[ln] == d.protocol or unity_1_in_line:
                     actions.append(Action(
                         type=ActionType.PLAY_FACE_UP, hand_index=hi, line_index=ln,
                     ))
@@ -288,13 +292,20 @@ class Game:
         # action. Speed 2's text (no "you may") is a target-eligibility
         # modifier handled by `_enumerate_shift_targets`, not a standalone
         # action.
+        # Spirit 3 top: "You may shift this card, even if covered."
+        # Unity 1 top (AX02): "If this card is covered, you may shift this
+        # card." — only emit SHIFT_OWN_CARD when Unity 1 is COVERED.
         for ln_src in range(NUM_LINES):
             stack = st.lines[ln_src].stack(ap)
             for pos, c in enumerate(stack):
                 if not c.face_up:
                     continue
                 d = st.defs[c.def_id]
-                if not (d.protocol == "Spirit" and d.value == 3):
+                is_spirit_3 = d.protocol == "Spirit" and d.value == 3
+                is_unity_1_covered = (
+                    d.protocol == "Unity" and d.value == 1 and pos < len(stack) - 1
+                )
+                if not (is_spirit_3 or is_unity_1_covered):
                     continue
                 for ln_dst in range(NUM_LINES):
                     if ln_dst == ln_src:
@@ -650,20 +661,29 @@ class Game:
             st.phase = Phase.CHECK_CACHE
             return
         if action.type is ActionType.SHIFT_OWN_CARD:
-            # Speed 2 / Spirit 3 affordance — shift this card even if covered.
+            # Affordance: shift this card via Spirit 3 ("you may shift this
+            # card, even if covered") or Unity 1 covered ("if this card is
+            # covered, you may shift this card").
             from .effects import shift_card
             src_line = action.line_index
             src_pos = action.hand_index
             dst_line = action.choice_index
             stack = st.lines[src_line].stack(ap)
-            # Validate the position points to a face-up Speed 2 / Spirit 3.
             if not (0 <= src_pos < len(stack)):
                 raise ValueError("SHIFT_OWN_CARD: src_pos out of range")
             c = stack[src_pos]
             d = st.defs[c.def_id]
-            valid = c.face_up and d.protocol == "Spirit" and d.value == 3
-            if not valid:
-                raise ValueError("SHIFT_OWN_CARD: target is not Spirit 3 face-up")
+            is_spirit_3 = c.face_up and d.protocol == "Spirit" and d.value == 3
+            is_unity_1_covered = (
+                c.face_up
+                and d.protocol == "Unity" and d.value == 1
+                and src_pos < len(stack) - 1
+            )
+            if not (is_spirit_3 or is_unity_1_covered):
+                raise ValueError(
+                    "SHIFT_OWN_CARD: target must be face-up Spirit 3, "
+                    "or covered face-up Unity 1"
+                )
             shift_card(st, src_line, ap, src_pos, dst_line)
             st.phase = Phase.CHECK_CACHE
             return
@@ -720,14 +740,19 @@ class Game:
             target_side = 1 - player
             actual_line = line_index - NUM_LINES
         if face_up:
+            from .effects import unity_card_may_be_played_faceup_in_line
             chaos_3_self = d.protocol == "Chaos" and d.value == 3
             corruption_0_self = d.protocol == "Corruption" and d.value == 0
             target_protos = st.players[target_side].protocols
+            unity_1_in_line = unity_card_may_be_played_faceup_in_line(
+                st, target_side, actual_line, d.protocol
+            )
             allowed = (
                 target_protos[actual_line] == d.protocol
                 or player_may_play_any_line_faceup(st, player)
                 or chaos_3_self
                 or corruption_0_self
+                or unity_1_in_line
             )
             if not allowed:
                 raise ValueError(

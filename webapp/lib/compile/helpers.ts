@@ -70,6 +70,19 @@ export function computeLineValue(state: GameState, lineIdx: number, player: Play
     if (d.protocol === "Metal" && d.value === 0) total -= 2;
   }
 
+  // Diversity 3 top (AX02, own side): +2 if any non-Diversity face-up
+  // card is in THIS stack. +2 per Diversity 3 instance.
+  const hasNonDivFaceup = stack.some(
+    (c) => c.faceUp && CARD_DEFS[c.defId].protocol !== "Diversity",
+  );
+  if (hasNonDivFaceup) {
+    for (const c of stack) {
+      if (!c.faceUp) continue;
+      const d = CARD_DEFS[c.defId];
+      if (d.protocol === "Diversity" && d.value === 3) total += 2;
+    }
+  }
+
   return Math.max(total, 0);
 }
 
@@ -142,7 +155,7 @@ function flagAfterDraw(state: GameState, player: PlayerIndex): void {
 function flagAfterDelete(state: GameState, deleter: PlayerIndex): void {
   (state.scratch as Record<string, unknown>)[`_pending_after_delete_by_p${deleter}`] = true;
 }
-function flagAfterShuffle(state: GameState, player: PlayerIndex): void {
+export function flagAfterShuffle(state: GameState, player: PlayerIndex): void {
   (state.scratch as Record<string, unknown>)[`_pending_after_shuffle_by_p${player}`] = true;
 }
 export function flagAfterRefresh(state: GameState, player: PlayerIndex): void {
@@ -398,7 +411,11 @@ export function enumerateAll(state: GameState, opts: EnumOpts): FieldTarget[] {
 function isShiftTargetableWhileCovered(card: CardInst): boolean {
   if (!card.faceUp) return false;
   const d = CARD_DEFS[card.defId];
-  return (d.protocol === "Speed" && d.value === 2) || (d.protocol === "Spirit" && d.value === 3);
+  return (
+    (d.protocol === "Speed" && d.value === 2)
+    || (d.protocol === "Spirit" && d.value === 3)
+    || (d.protocol === "Unity" && d.value === 1)
+  );
 }
 
 export function enumerateShiftTargets(state: GameState, opts: EnumOpts): FieldTarget[] {
@@ -579,6 +596,22 @@ export function playerMayPlayAnyLineFaceup(state: GameState, player: PlayerIndex
     }
   }
   return false;
+}
+
+/** Unity 1 bottom (AX02): "Unity cards may be played face-up in this
+ *  line." Active while Unity 1 is face-up + uncovered on `player`'s
+ *  side of `lineIdx`. Allows face-up play of Unity-protocol cards
+ *  without the usual protocol-match restriction. */
+export function unityCardMayBePlayedFaceupInLine(
+  state: GameState, player: PlayerIndex, lineIdx: number, playedProtocol: string,
+): boolean {
+  if (playedProtocol !== "Unity") return false;
+  const stack = lineStack(state.lines[lineIdx], player);
+  if (stack.length === 0) return false;
+  const top = stack[stack.length - 1];
+  if (!top.faceUp) return false;
+  const d = CARD_DEFS[top.defId];
+  return d.protocol === "Unity" && d.value === 1;
 }
 
 export function playerSkipsCheckCache(state: GameState, player: PlayerIndex): boolean {
