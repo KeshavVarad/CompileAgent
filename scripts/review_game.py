@@ -32,15 +32,16 @@ def _value_only(model: PolicyValueNet, game: Game, perspective: int, device) -> 
     legal = game.legal_actions()
     if not legal:
         return 0.0
-    raw, card_ids, proto_ids, mask = encode_actions(game, legal, perspective)
+    raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(game, legal, perspective)
     import numpy as np
     s = {k: torch.from_numpy(v).unsqueeze(0).to(device) for k, v in state.items()}
     ar = torch.from_numpy(raw).unsqueeze(0).to(device)
     ac = torch.from_numpy(card_ids).unsqueeze(0).to(device)
     ap = torch.from_numpy(proto_ids).unsqueeze(0).to(device)
+    ae = torch.from_numpy(extra_card_ids).unsqueeze(0).to(device)
     am = torch.from_numpy(mask).unsqueeze(0).to(device)
     with torch.no_grad():
-        _, value = model(s, ar, ac, ap, am)
+        _, value = model(s, ar, ac, ap, ae, am)
     return float(value[0].item())
 
 

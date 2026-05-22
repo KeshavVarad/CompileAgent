@@ -21,6 +21,7 @@ class Batch:
     action_raw: torch.Tensor
     action_card_ids: torch.Tensor
     action_proto_ids: torch.Tensor
+    action_extra_card_ids: torch.Tensor
     action_mask: torch.Tensor
     action_idx: torch.Tensor
     old_log_prob: torch.Tensor
@@ -63,6 +64,9 @@ def stack_batch(records: list[StepRecord], device: torch.device) -> Batch:
     action_raw = torch.from_numpy(np.stack([r.action_raw for r in records])).to(device)
     action_card_ids = torch.from_numpy(np.stack([r.action_card_ids for r in records])).to(device)
     action_proto_ids = torch.from_numpy(np.stack([r.action_proto_ids for r in records])).to(device)
+    action_extra_card_ids = torch.from_numpy(
+        np.stack([r.action_extra_card_ids for r in records]),
+    ).to(device)
     action_mask = torch.from_numpy(np.stack([r.action_mask for r in records])).to(device)
     action_idx = torch.tensor([r.action_idx for r in records], dtype=torch.long, device=device)
     old_log_prob = torch.tensor([r.log_prob for r in records], dtype=torch.float32, device=device)
@@ -73,6 +77,7 @@ def stack_batch(records: list[StepRecord], device: torch.device) -> Batch:
         action_raw=action_raw,
         action_card_ids=action_card_ids,
         action_proto_ids=action_proto_ids,
+        action_extra_card_ids=action_extra_card_ids,
         action_mask=action_mask,
         action_idx=action_idx,
         old_log_prob=old_log_prob,
@@ -92,6 +97,7 @@ def minibatches(batch: Batch, batch_size: int, rng: np.random.Generator):
             action_raw=batch.action_raw[sel_t],
             action_card_ids=batch.action_card_ids[sel_t],
             action_proto_ids=batch.action_proto_ids[sel_t],
+            action_extra_card_ids=batch.action_extra_card_ids[sel_t],
             action_mask=batch.action_mask[sel_t],
             action_idx=batch.action_idx[sel_t],
             old_log_prob=batch.old_log_prob[sel_t],

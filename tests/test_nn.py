@@ -59,10 +59,11 @@ def test_encode_state_shapes():
 def test_encode_actions_shapes_and_mask():
     g = _make_game()
     legal = g.legal_actions()
-    raw, card_ids, proto_ids, mask = encode_actions(g, legal, perspective=0)
+    raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(g, legal, perspective=0)
     assert raw.shape == (MAX_ACTIONS, raw.shape[1])
     assert card_ids.shape == (MAX_ACTIONS,)
     assert proto_ids.shape == (MAX_ACTIONS,)
+    assert extra_card_ids.shape == (MAX_ACTIONS,)
     assert mask.shape == (MAX_ACTIONS,)
     assert int(mask.sum()) == len(legal)
     # Padded rows should be zero
@@ -73,14 +74,15 @@ def test_model_forward_value_bounded():
     g = _make_game()
     obs = encode_state(g, 0)
     legal = g.legal_actions()
-    raw, card_ids, proto_ids, mask = encode_actions(g, legal, 0)
+    raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(g, legal, 0)
     model = PolicyValueNet()
     state = {k: torch.from_numpy(v).unsqueeze(0) for k, v in obs.items()}
     ar = torch.from_numpy(raw).unsqueeze(0)
     ac = torch.from_numpy(card_ids).unsqueeze(0)
     ap = torch.from_numpy(proto_ids).unsqueeze(0)
+    ae = torch.from_numpy(extra_card_ids).unsqueeze(0)
     am = torch.from_numpy(mask).unsqueeze(0)
-    logits, value = model(state, ar, ac, ap, am)
+    logits, value = model(state, ar, ac, ap, ae, am)
     assert logits.shape == (1, MAX_ACTIONS)
     assert value.shape == (1,)
     assert torch.isfinite(value).all()
@@ -255,8 +257,12 @@ def test_luck_decisions_are_exposed_to_agent_with_rich_encoding():
     assert len(choose_actions) == 7, f"expected 7 number choices, got {len(choose_actions)}"
     # Each CHOOSE_TARGET should carry a unique stated_value scalar in the
     # encoder's raw features (the last slot).
-    raw, _card_ids, _proto_ids, mask = encode_actions(g, legal, perspective=0)
-    stated_values = sorted({float(raw[i][-1]) for i in range(len(legal)) if mask[i]})
+    raw, _card_ids, _proto_ids, _extra_card_ids, mask = encode_actions(g, legal, perspective=0)
+    # The stated_value slot sits BEFORE the A5 soon-covered flags and the
+    # A3 lookahead block — locate it by offset from the right.
+    from compile_engine.nn.encoder import ACTION_LOOKAHEAD_DIM
+    stated_slot = -(2 + ACTION_LOOKAHEAD_DIM + 1)
+    stated_values = sorted({float(raw[i][stated_slot]) for i in range(len(legal)) if mask[i]})
     # We expect at least 7 distinct numbers in [0, 1] for the 7 options.
     assert sum(1 for v in stated_values if 0.0 <= v <= 1.0) >= 7
 
@@ -286,7 +292,7 @@ def test_luck_decisions_are_exposed_to_agent_with_rich_encoding():
     choose2 = [a for a in legal2 if a.type is ActionType.CHOOSE_TARGET]
     # 30 protocols (12+3+12+3) across all sets.
     assert len(choose2) == 30
-    raw2, card_ids2, proto_ids2, mask2 = encode_actions(g2, legal2, perspective=0)
+    raw2, card_ids2, proto_ids2, _extra_card_ids2, mask2 = encode_actions(g2, legal2, perspective=0)
     # Each CHOOSE_TARGET option should have a non-zero proto_id (matching one
     # of the 30 protocols), so the protocol embedding kicks in.
     proto_ids_set = {int(proto_ids2[i]) for i in range(len(legal2)) if mask2[i]}

@@ -297,14 +297,17 @@ def _policy_and_value(
     slots in the model output are ignored."""
     perspective = game.decider()
     state = encode_state(game, perspective)
-    raw, card_ids, proto_ids, mask = encode_actions(game, legal, perspective)
+    raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(
+        game, legal, perspective,
+    )
     s = {k: torch.from_numpy(v).unsqueeze(0).to(device) for k, v in state.items()}
     ar = torch.from_numpy(raw).unsqueeze(0).to(device)
     ac = torch.from_numpy(card_ids).unsqueeze(0).to(device)
     ap = torch.from_numpy(proto_ids).unsqueeze(0).to(device)
+    ae = torch.from_numpy(extra_card_ids).unsqueeze(0).to(device)
     am = torch.from_numpy(mask).unsqueeze(0).to(device)
     with torch.no_grad():
-        logits, value = model(s, ar, ac, ap, am)
+        logits, value = model(s, ar, ac, ap, ae, am)
     logits = logits[0].detach().cpu().numpy()
     v = float(value[0].item())
     # Softmax over the legal-action prefix only — padded slots already
@@ -980,15 +983,18 @@ class MCTSAgent:
         # Encode all leaves serially (cheap numpy work). The expensive
         # part is the single batched torch forward below.
         state_dicts = []
-        raws, cards, protos, masks, n_legals = [], [], [], [], []
+        raws, cards, protos, extras, masks, n_legals = [], [], [], [], [], []
         for l in leaves:
             persp = l.leaf.game.decider()
             s = encode_state(l.leaf.game, persp)
-            raw, card_ids, proto_ids, mask = encode_actions(l.leaf.game, l.legal, persp)
+            raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(
+                l.leaf.game, l.legal, persp,
+            )
             state_dicts.append(s)
             raws.append(raw)
             cards.append(card_ids)
             protos.append(proto_ids)
+            extras.append(extra_card_ids)
             masks.append(mask)
             n_legals.append(len(l.legal))
         # Stack into [B, ...] tensors.
@@ -1000,9 +1006,10 @@ class MCTSAgent:
         ar = torch.from_numpy(np.stack(raws)).to(self.device)
         ac = torch.from_numpy(np.stack(cards)).to(self.device)
         ap = torch.from_numpy(np.stack(protos)).to(self.device)
+        ae = torch.from_numpy(np.stack(extras)).to(self.device)
         am = torch.from_numpy(np.stack(masks)).to(self.device)
         with torch.no_grad():
-            logits, values = self.model(batched_state, ar, ac, ap, am)
+            logits, values = self.model(batched_state, ar, ac, ap, ae, am)
         logits_np = logits.detach().cpu().numpy()  # [B, MAX_ACTIONS]
         values_np = values.detach().cpu().numpy()  # [B]
         out: list[tuple[np.ndarray, float]] = []

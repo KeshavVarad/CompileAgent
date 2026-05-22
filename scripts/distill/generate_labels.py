@@ -125,6 +125,7 @@ def main() -> int:
     raws: list[np.ndarray] = []
     cards: list[np.ndarray] = []
     protos: list[np.ndarray] = []
+    extras: list[np.ndarray] = []  # A5 soon-covered card token per action
     masks: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     value_targets: list[float] = []  # MCTS root V per labeled state, in [-1, 1]
@@ -208,7 +209,7 @@ def main() -> int:
             )
             perspective = who
             state = encode_state(game, perspective)
-            raw, card_ids, proto_ids, mask = encode_actions(game, legal, perspective)
+            raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(game, legal, perspective)
             # Pad target to MAX_ACTIONS so we can stack.
             target_padded = np.zeros(MAX_ACTIONS, dtype=np.float32)
             n_t = min(MAX_ACTIONS, len(target_over_legal))
@@ -224,6 +225,7 @@ def main() -> int:
             raws.append(raw)
             cards.append(card_ids)
             protos.append(proto_ids)
+            extras.append(extra_card_ids)
             masks.append(mask)
             targets.append(target_padded)
             value_targets.append(v_root)
@@ -270,6 +272,7 @@ def main() -> int:
         "action_raw": np.stack(raws),
         "action_card_ids": np.stack(cards),
         "action_proto_ids": np.stack(protos),
+        "action_extra_card_ids": np.stack(extras),
         "action_mask": np.stack(masks),
         "target": np.stack(targets),
         "value_target": np.asarray(value_targets, dtype=np.float32),

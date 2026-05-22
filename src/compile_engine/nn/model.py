@@ -23,10 +23,12 @@ from ..cards import (
     static_features_for_def,
 )
 from .encoder import (
+    ACTION_LOOKAHEAD_DIM,
     CARD_VOCAB_SIZE,
     MAX_ACTIONS,
     MAX_HAND,
     MAX_STACK,
+    NUM_PROMPT_CATEGORIES,
     PROTO_VOCAB_SIZE,
     action_input_dim,
     card_repr_dim,
@@ -51,24 +53,28 @@ class _MLP(nn.Module):
         return self.net(x)
 
 
-def _aggregate_stack(card_embs: torch.Tensor, meta: torch.Tensor) -> torch.Tensor:
-    """Per-stack aggregation: mean + max of card embeddings, plus meta scalars.
+def _aggregate_stack(
+    card_embs: torch.Tensor, flags: torch.Tensor, meta: torch.Tensor,
+) -> torch.Tensor:
+    """Per-stack aggregation: mean + max of (card embedding ⊕ per-slot flags),
+    plus meta scalars.
 
     Args
     ----
     card_embs : [B, 3, 2, MAX_STACK, d_card]   — embedding of each slot token
                                                   (PAD lookups are zeros)
+    flags     : [B, 3, 2, MAX_STACK, 3]        — (face_up, committed, position_norm)
+                                                  per slot. PAD slots have zeros.
     meta      : [B, 3, 2, 3]                   — (fu_count, fd_count, depth_norm)
 
     Returns
     -------
-    [B, 3 * 2 * (2*d_card + 3)] — flattened per-stack features.
+    [B, 3 * 2 * (2*(d_card+3) + 3)] — flattened per-stack features.
     """
-    # Build a mask of "real" slots from the non-zero token positions implied
-    # by non-zero embeddings. Easier: pass meta-derived depth.
-    mean_emb = card_embs.mean(dim=-2)                     # [B, 3, 2, d_card]
-    max_emb = card_embs.amax(dim=-2)                      # [B, 3, 2, d_card]
-    out = torch.cat([mean_emb, max_emb, meta], dim=-1)    # [B, 3, 2, 2*d_card + 3]
+    enriched = torch.cat([card_embs, flags], dim=-1)      # [B, 3, 2, MAX_STACK, d_card+3]
+    mean_emb = enriched.mean(dim=-2)                      # [B, 3, 2, d_card+3]
+    max_emb = enriched.amax(dim=-2)                       # [B, 3, 2, d_card+3]
+    out = torch.cat([mean_emb, max_emb, meta], dim=-1)    # [B, 3, 2, 2*(d_card+3) + 3]
     B = out.shape[0]
     return out.reshape(B, -1)
 
@@ -109,11 +115,17 @@ class PolicyValueNet(nn.Module):
         # Action encoder
         from ..actions import ActionType
         n_atypes = len(ActionType)
-        # Mirrors `encoder.encode_actions` layout: type_one_hot + hand_idx +
-        # src_line(4) + dst_line(4) + choice_idx + target_meta(8) + stated_val.
-        self.action_raw_dim = n_atypes + 1 + 4 + 4 + 1 + 8 + 1
+        # Mirrors `encoder.encode_actions` layout:
+        #   type_one_hot + hand_idx + src_line(4) + dst_line(4) +
+        #   choice_idx + target_meta(8) + stated_val +
+        #   A5 soon_covered_present + soon_covered_face_up (2) +
+        #   A3 lookahead deltas.
+        self.action_raw_dim = n_atypes + 1 + 4 + 4 + 1 + 8 + 1 + 2 + ACTION_LOOKAHEAD_DIM
+        # Action MLP consumes raw feats + primary card emb + proto emb +
+        # A5 soon-covered card emb (same card_repr_dim).
         self.action_mlp = _MLP(
-            self.action_raw_dim + self.card_repr_dim + d_proto, hidden, hidden, n_layers=2,
+            self.action_raw_dim + 2 * self.card_repr_dim + d_proto,
+            hidden, hidden, n_layers=2,
         )
 
         # Value head
@@ -153,8 +165,13 @@ class PolicyValueNet(nn.Module):
         """
         field_tokens = batch["field_tokens"]
         card_embs = self.lookup_card(field_tokens)  # [B, 3, 2, MAX_STACK, card_repr_dim]
+        field_flags = batch["field_flags"]          # [B, 3, 2, MAX_STACK, 3]
         field_meta = batch["field_meta"]
-        field_feat = _aggregate_stack(card_embs, field_meta)  # [B, *]
+        # A4: per-slot face_up/committed/position flags are concatenated to
+        # each card emb before mean+max aggregation, so own-side face-down
+        # vs face-up cards are distinguishable (previously these flags were
+        # dropped by the model).
+        field_feat = _aggregate_stack(card_embs, field_flags, field_meta)  # [B, *]
 
         # Protocols
         proto_ids = batch["protocols"][..., 0]    # [B, 2, 3]
@@ -180,8 +197,17 @@ class PolicyValueNet(nn.Module):
         sc = batch["scalars"]
         ph = batch["phase"]
 
+        # A1: pending-choice context. Yielding-card embedding + prompt
+        # category one-hot + pending-stack depth.
+        pending_card_emb = self.lookup_card(batch["pending_card_token"])  # [B, card_repr_dim]
+        pending_cat = batch["pending_category"]                            # [B, NUM_PROMPT_CATEGORIES]
+        pending_depth = batch["pending_depth_norm"]                        # [B, 1]
+
         dense = torch.cat(
-            [field_feat, proto_feat, hand_feat, trash_feat, lv, sc, ph],
+            [
+                field_feat, proto_feat, hand_feat, trash_feat, lv, sc, ph,
+                pending_card_emb, pending_cat, pending_depth,
+            ],
             dim=-1,
         )
         return dense
@@ -190,13 +216,15 @@ class PolicyValueNet(nn.Module):
 
     def encode_actions_dense(
         self,
-        raw: torch.Tensor,        # [B, MAX_ACTIONS, raw_dim]
-        card_ids: torch.Tensor,   # [B, MAX_ACTIONS]
-        proto_ids: torch.Tensor,  # [B, MAX_ACTIONS]
+        raw: torch.Tensor,             # [B, MAX_ACTIONS, raw_dim]
+        card_ids: torch.Tensor,        # [B, MAX_ACTIONS] — primary card
+        proto_ids: torch.Tensor,       # [B, MAX_ACTIONS]
+        extra_card_ids: torch.Tensor,  # [B, MAX_ACTIONS] — A5 soon-covered card
     ) -> torch.Tensor:
-        card_e = self.lookup_card(card_ids)  # [B, MAX_ACTIONS, card_repr_dim]
-        proto_e = self.proto_emb(proto_ids)  # [B, MAX_ACTIONS, d_proto]
-        feats = torch.cat([raw, card_e, proto_e], dim=-1)
+        card_e = self.lookup_card(card_ids)            # [B, MAX_ACTIONS, card_repr_dim]
+        proto_e = self.proto_emb(proto_ids)            # [B, MAX_ACTIONS, d_proto]
+        extra_card_e = self.lookup_card(extra_card_ids)  # [B, MAX_ACTIONS, card_repr_dim]
+        feats = torch.cat([raw, card_e, proto_e, extra_card_e], dim=-1)
         return self.action_mlp(feats)        # [B, MAX_ACTIONS, hidden]
 
     # -------------------------------------------------------------- forward(s)
@@ -207,6 +235,7 @@ class PolicyValueNet(nn.Module):
         action_raw: torch.Tensor,
         action_card_ids: torch.Tensor,
         action_proto_ids: torch.Tensor,
+        action_extra_card_ids: torch.Tensor,
         action_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (logits, value).
@@ -217,7 +246,9 @@ class PolicyValueNet(nn.Module):
         dense = self.encode_state_dense(state_batch)
         h = self.state_ln(self.state_trunk(dense))         # [B, hidden]
 
-        a_h = self.encode_actions_dense(action_raw, action_card_ids, action_proto_ids)
+        a_h = self.encode_actions_dense(
+            action_raw, action_card_ids, action_proto_ids, action_extra_card_ids,
+        )
         # Dot product over the hidden dim.
         logits = torch.einsum("bh,bah->ba", h, a_h)         # [B, MAX_ACTIONS]
         logits = logits.masked_fill(~action_mask, -1e9)
