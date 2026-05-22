@@ -60,6 +60,12 @@ export const AFTER_SELF_DELETE_EFFECTS: Record<string, EffectFn> = {};
 export const AFTER_SELF_DRAW_EFFECTS: Record<string, EffectFn> = {};
 export const AFTER_SELF_SHUFFLE_EFFECTS: Record<string, EffectFn> = {};
 export const AFTER_SELF_REFRESH_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_OPP_DRAW_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_OPP_REFRESH_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_OPP_COMPILE_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_ANY_REFRESH_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_OPP_PLAY_IN_LINE_EFFECTS: Record<string, EffectFn> = {};
+export const AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS: Record<string, EffectFn> = {};
 export const FLIP_TRIGGER_EFFECTS: Record<string, EffectFn> = {};
 export const WHEN_DELETED_BY_COMPILE_EFFECTS: Record<string, EffectFn> = {};
 
@@ -1742,7 +1748,12 @@ register(MIDDLE_EFFECTS, "MN02:Ice:1", function* (state, ap, li, card) {
   shiftCard(state, li, card.owner, s.indexOf(card), dest[idx]);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Ice:1", function* (state, ap) {
+// Ice 1 bottom — "After your opponent plays a card in this line: Your
+// opponent discards 1 card." Line-scoped at the broadcast site. Fires
+// only while uncovered.
+register(AFTER_OPP_PLAY_IN_LINE_EFFECTS, "MN02:Ice:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   yield* discardN(state, (ap === 0 ? 1 : 0) as PlayerIndex, 1);
 });
 
@@ -1971,7 +1982,11 @@ register(MIDDLE_EFFECTS, "MN02:Mirror:3", function* (state, ap, li, card) {
   if (j != null && oppIn[j]) flipCard(state, oppIn[j].line, oppIn[j].player, oppIn[j].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Mirror:4", function* (state, ap) {
+// Mirror 4 bottom — "After your opponent draws cards: Draw 1 card."
+// Fires only while uncovered.
+register(AFTER_OPP_DRAW_EFFECTS, "MN02:Mirror:4", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -2040,7 +2055,13 @@ register(MIDDLE_EFFECTS, "MN02:Peace:3", function* (state, ap) {
   if (i != null && candidates[i]) flipCard(state, candidates[i].line, candidates[i].player, candidates[i].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Peace:4", function* (state, ap) {
+// Peace 4 bottom — "After you discard cards during your opponent's
+// turn: Draw 1 card." Drain only fires when current_player != discarder,
+// so `ap` here is the discarder (Peace 4's owner) on opp's turn. Fires
+// only while uncovered.
+register(AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS, "MN02:Peace:4", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   drawCards(state, ap, 1);
   if (false) yield {} as Choice;
 });
@@ -2299,16 +2320,24 @@ register(AFTER_SELF_REFRESH_EFFECTS, "MN02:War:0", function* (state, ap, li, car
   }
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:War:0", function* (state, ap, li, card) {
+// War 0 bottom — "After your opponent draws cards: You may delete 1
+// card." Fires only while uncovered.
+register(AFTER_OPP_DRAW_EFFECTS, "MN02:War:0", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const targets = enumerateUncovered(state, { exclude: card, activePlayer: ap });
   if (targets.length === 0) return;
-  yield* chooseFieldTarget("(optional) Delete 1 card", targets, state, ap, true);
+  yield* chooseFieldTarget("(optional) Delete 1 card (War 0)", targets, state, ap, true);
   const i = state.scratch["_last_target_idx"] as number | undefined;
   if (i == null || !targets[i]) return;
   deleteCardFromField(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:War:1", function* (state, ap) {
+// War 1 bottom — "After your opponent refreshes: Discard any number of
+// cards. Refresh." Fires only while uncovered.
+register(AFTER_OPP_REFRESH_EFFECTS, "MN02:War:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   yield* discardOptionalLoop(state, ap, state.players[ap].hand.length);
   refreshPlayer(state, ap);
 });
@@ -2321,7 +2350,11 @@ register(MIDDLE_EFFECTS, "MN02:War:2", function* (state, ap, li, card) {
   if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:War:2", function* (state, ap) {
+// War 2 bottom — "After your opponent compiles: Your opponent discards
+// their hand." Fires only while uncovered.
+register(AFTER_OPP_COMPILE_EFFECTS, "MN02:War:2", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   while (state.players[opp].hand.length > 0) discardToTrash(state, opp, 0);
   if (false) yield {} as Choice;
@@ -2369,7 +2402,12 @@ register(MIDDLE_EFFECTS, "AX02:Assimilation:1", function* (state, ap) {
   refreshPlayer(state, ap);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Assimilation:1", function* (state, ap) {
+// Assimilation 1 bottom — "After a player refreshes: Draw the top card
+// of your opponent's deck. Discard 1 card into their trash." Fires only
+// while uncovered. Triggered by *either* player's refresh.
+register(AFTER_ANY_REFRESH_EFFECTS, "AX02:Assimilation:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const psOpp = state.players[opp];
   if (psOpp.deck.length === 0 && psOpp.trash.length > 0) {
@@ -2585,6 +2623,30 @@ export function getAfterSelfShuffleEffect(defId: number): EffectFn | null {
 export function getAfterSelfRefreshEffect(defId: number): EffectFn | null {
   const k = keyForDefId(defId);
   return k == null ? null : (AFTER_SELF_REFRESH_EFFECTS[k] ?? null);
+}
+export function getAfterOppDrawEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_OPP_DRAW_EFFECTS[k] ?? null);
+}
+export function getAfterOppRefreshEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_OPP_REFRESH_EFFECTS[k] ?? null);
+}
+export function getAfterOppCompileEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_OPP_COMPILE_EFFECTS[k] ?? null);
+}
+export function getAfterAnyRefreshEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_ANY_REFRESH_EFFECTS[k] ?? null);
+}
+export function getAfterOppPlayInLineEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_OPP_PLAY_IN_LINE_EFFECTS[k] ?? null);
+}
+export function getAfterSelfDiscardOnOppTurnEffect(defId: number): EffectFn | null {
+  const k = keyForDefId(defId);
+  return k == null ? null : (AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS[k] ?? null);
 }
 export function getFlipTriggerEffect(defId: number): EffectFn | null {
   const k = keyForDefId(defId);

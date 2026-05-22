@@ -155,6 +155,18 @@ def _flag_after_refresh(state: GameState, player: int) -> None:
     state.scratch[f"_pending_after_refresh_by_p{player}"] = True
 
 
+def _flag_after_compile(state: GameState, player: int) -> None:
+    state.scratch[f"_pending_after_compile_by_p{player}"] = True
+
+
+def _flag_after_play_in_line(state: GameState, player: int, line: int) -> None:
+    # List of (player_who_played, line_played_in) so multiple plays
+    # within a single effect chain (e.g. Speed 0 sub-play) each get
+    # their own broadcast.
+    lst = state.scratch.setdefault("_pending_after_play_list", [])
+    lst.append((player, line))
+
+
 def _flag_flip(state: GameState, card: CardInst) -> None:
     # List of card instances whose flip needs to broadcast on the next
     # drain. Stored as a list rather than a set so order is preserved
@@ -767,6 +779,12 @@ AFTER_SELF_DELETE_EFFECTS: dict[str, EffectFn] = {}     # after this player dele
 AFTER_SELF_DRAW_EFFECTS: dict[str, EffectFn] = {}       # after this player draws ≥1 card
 AFTER_SELF_SHUFFLE_EFFECTS: dict[str, EffectFn] = {}    # after this player shuffles their deck
 AFTER_SELF_REFRESH_EFFECTS: dict[str, EffectFn] = {}    # after this player refreshes
+AFTER_OPP_DRAW_EFFECTS: dict[str, EffectFn] = {}        # after opponent draws ≥1 card
+AFTER_OPP_REFRESH_EFFECTS: dict[str, EffectFn] = {}     # after opponent refreshes
+AFTER_OPP_COMPILE_EFFECTS: dict[str, EffectFn] = {}     # after opponent compiles a line
+AFTER_ANY_REFRESH_EFFECTS: dict[str, EffectFn] = {}     # after either player refreshes (Assim 1)
+AFTER_OPP_PLAY_IN_LINE_EFFECTS: dict[str, EffectFn] = {}  # after opp plays in same line as this card (Ice 1)
+AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS: dict[str, EffectFn] = {}  # after this player discards during opp's turn (Peace 4)
 FLIP_TRIGGER_EFFECTS: dict[str, EffectFn] = {}          # whenever this card flips, either direction
 WHEN_DELETED_BY_COMPILE_EFFECTS: dict[str, EffectFn] = {}  # before this card is sent to trash by compile
 
@@ -841,6 +859,30 @@ def after_self_refresh(key: str):
     return _register(AFTER_SELF_REFRESH_EFFECTS, key)
 
 
+def after_opp_draw(key: str):
+    return _register(AFTER_OPP_DRAW_EFFECTS, key)
+
+
+def after_opp_refresh(key: str):
+    return _register(AFTER_OPP_REFRESH_EFFECTS, key)
+
+
+def after_opp_compile(key: str):
+    return _register(AFTER_OPP_COMPILE_EFFECTS, key)
+
+
+def after_any_refresh(key: str):
+    return _register(AFTER_ANY_REFRESH_EFFECTS, key)
+
+
+def after_opp_play_in_line(key: str):
+    return _register(AFTER_OPP_PLAY_IN_LINE_EFFECTS, key)
+
+
+def after_self_discard_on_opp_turn(key: str):
+    return _register(AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS, key)
+
+
 def flip_trigger(key: str):
     return _register(FLIP_TRIGGER_EFFECTS, key)
 
@@ -903,6 +945,30 @@ def get_after_self_shuffle_effect(d: "CardDef") -> EffectFn | None:
 
 def get_after_self_refresh_effect(d: "CardDef") -> EffectFn | None:
     return AFTER_SELF_REFRESH_EFFECTS.get(d.key)
+
+
+def get_after_opp_draw_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_OPP_DRAW_EFFECTS.get(d.key)
+
+
+def get_after_opp_refresh_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_OPP_REFRESH_EFFECTS.get(d.key)
+
+
+def get_after_opp_compile_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_OPP_COMPILE_EFFECTS.get(d.key)
+
+
+def get_after_any_refresh_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_ANY_REFRESH_EFFECTS.get(d.key)
+
+
+def get_after_opp_play_in_line_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_OPP_PLAY_IN_LINE_EFFECTS.get(d.key)
+
+
+def get_after_self_discard_on_opp_turn_effect(d: "CardDef") -> EffectFn | None:
+    return AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS.get(d.key)
 
 
 def get_flip_trigger_effect(d: "CardDef") -> EffectFn | None:
@@ -3062,8 +3128,15 @@ def _ice_1(state, ap, li, card):
     shift_card(state, li, card.owner, cur_pos, dest[idx])
 
 
-@bottom_on_play("MN02:Ice:1")
-def _ice_1_bottom(state, ap, li, card):
+# Ice 1 bottom — "After your opponent plays a card in this line: Your
+# opponent discards 1 card." Fires only while uncovered. The line is
+# already line-scoped at the broadcast site (Ice 1 only sees plays into
+# its own line).
+@after_opp_play_in_line("MN02:Ice:1")
+def _ice_1_after_opp_play(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     yield from _discard_n(state, state.opponent(ap), 1)
 
 
@@ -3340,8 +3413,13 @@ def _mirror_3(state, ap, li, card):
         flip_card(state, u[0], u[1], u[2])
 
 
-@bottom_on_play("MN02:Mirror:4")
-def _mirror_4_bottom(state, ap, li, card):
+# Mirror 4 bottom — "After your opponent draws cards: Draw 1 card."
+# Fires only while uncovered.
+@after_opp_draw("MN02:Mirror:4")
+def _mirror_4_after_opp_draw(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     draw_cards(state, ap, 1)
     if False:
         yield None  # type: ignore[misc]
@@ -3427,8 +3505,15 @@ def _peace_3(state, ap, li, card):
         flip_card(state, t[0], t[1], t[2])
 
 
-@bottom_on_play("MN02:Peace:4")
-def _peace_4_bottom(state, ap, li, card):
+# Peace 4 bottom — "After you discard cards during your opponent's
+# turn: Draw 1 card." Fires only while uncovered. Drain only triggers
+# this when current_player != discarder, so `ap` here is the card owner
+# (the discarder), and it's already opp's turn.
+@after_self_discard_on_opp_turn("MN02:Peace:4")
+def _peace_4_after_discard_opp_turn(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     draw_cards(state, ap, 1)
     if False:
         yield None  # type: ignore[misc]
@@ -3710,13 +3795,18 @@ def _war_0_top(state, ap, li, card):
             card.face_up = not card.face_up
 
 
-@bottom_on_play("MN02:War:0")
-def _war_0_bottom(state, ap, li, card):
+# War 0 bottom — "After your opponent draws cards: You may delete 1
+# card." Fires only while uncovered.
+@after_opp_draw("MN02:War:0")
+def _war_0_after_opp_draw(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if not targets:
         return
     opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
-    idx = yield Choice(prompt="(optional) Delete 1 card",
+    idx = yield Choice(prompt="(optional) Delete 1 card (War 0)",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1 or not (0 <= idx < len(targets)):
         return
@@ -3724,9 +3814,13 @@ def _war_0_bottom(state, ap, li, card):
     delete_card_from_field(state, t[0], t[1], t[2])
 
 
-@bottom_on_play("MN02:War:1")
-def _war_1_bottom(state, ap, li, card):
-    # Discard any number of cards. Refresh.
+# War 1 bottom — "After your opponent refreshes: Discard any number of
+# cards. Refresh." Fires only while uncovered.
+@after_opp_refresh("MN02:War:1")
+def _war_1_after_opp_refresh(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     yield from _discard_optional_loop(state, ap, max_n=len(state.players[ap].hand))
     refresh_player(state, ap)
 
@@ -3743,9 +3837,13 @@ def _war_2(state, ap, li, card):
         flip_card(state, t[0], t[1], t[2])
 
 
-@bottom_on_play("MN02:War:2")
-def _war_2_bottom(state, ap, li, card):
-    # Opponent discards their hand.
+# War 2 bottom — "After your opponent compiles: Your opponent discards
+# their hand." Fires only while uncovered.
+@after_opp_compile("MN02:War:2")
+def _war_2_after_opp_compile(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     opp = state.opponent(ap)
     while state.players[opp].hand:
         discard_to_trash(state, opp, 0)
@@ -3803,9 +3901,14 @@ def _assim_1(state, ap, li, card):
     refresh_player(state, ap)
 
 
-@bottom_on_play("AX02:Assimilation:1")
-def _assim_1_bottom(state, ap, li, card):
-    # Draw the top card of your opponent's deck. Discard 1 card into their trash.
+# Assimilation 1 bottom — "After a player refreshes: Draw the top card
+# of your opponent's deck. Discard 1 card into their trash." Fires only
+# while uncovered. Triggered by *either* player's refresh.
+@after_any_refresh("AX02:Assimilation:1")
+def _assim_1_after_any_refresh(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     opp = state.opponent(ap)
     ps_opp = state.players[opp]
     if not ps_opp.deck and ps_opp.trash:
