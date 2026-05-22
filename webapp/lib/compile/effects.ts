@@ -490,10 +490,13 @@ register(START_EFFECTS, "MN01:Psychic:1", function* (state, ap, li, card) {
 
 register(START_EFFECTS, "MN01:Death:1", function* (state, ap, li, card) {
   // Errata: "Start: You may draw 1 card. If you do, delete 1 other card. Then, delete this card."
+  // Codex p.2: if the "delete 1 other" sub-instruction has no valid
+  // target, the chain still resolves (you don't gain the benefit of
+  // the unfulfilled instruction, but "Then, delete this card" still
+  // fires). So offer the optional draw chain even when no other delete
+  // targets currently exist.
   const deckHas = state.players[ap].deck.length > 0 || state.players[ap].trash.length > 0;
   if (!deckHas) return;
-  const targets = enumerateUncovered(state, { exclude: card, activePlayer: ap });
-  if (targets.length === 0) return;
   const idx0: number = yield {
     prompt: "(optional) Draw 1 + delete 1 other card + delete this card",
     options: ["accept", "skip"], targets: [0, -1], optional: true, decider: ap,
@@ -506,7 +509,7 @@ register(START_EFFECTS, "MN01:Death:1", function* (state, ap, li, card) {
     const i2 = state.scratch["_last_target_idx"] as number | undefined;
     if (i2 != null && t2[i2]) deleteCardFromField(state, t2[i2].line, t2[i2].player, t2[i2].pos);
   }
-  // Delete this card from wherever it is.
+  // Delete this card from wherever it is (Codex FAQ p.7: top can self-delete even if covered).
   for (let ln = 0; ln < NUM_LINES; ln++) {
     for (const pl of [0, 1] as PlayerIndex[]) {
       const stack = lineStack(state.lines[ln], pl);
@@ -633,16 +636,21 @@ register(MIDDLE_EFFECTS, "MN01:Gravity:0", function* (state, ap, li, card) {
 });
 
 register(MIDDLE_EFFECTS, "MN01:Gravity:1", function* (state, ap, li) {
+  // Draw 2 cards. Shift 1 card either to or from this line.
+  // Codex p.3 default targeting: "your cards or your opponent's cards
+  // can both be selected" — opp's cards are valid too. Shifts stay on
+  // the card's own side; "this line" refers to the line column.
   drawCards(state, ap, 2);
-  const candidates = enumerateShiftTargets(state, { owner: "self", activePlayer: ap });
+  const candidates = enumerateShiftTargets(state, { owner: "any", activePlayer: ap });
   if (candidates.length === 0) return;
   type Opt = { label: string; t: FieldTarget; dst: number };
   const opts: Opt[] = [];
   for (const t of candidates) {
+    const sideTag = t.player === ap ? "yours" : "opp";
     if (t.line === li) {
-      for (const dst of [0, 1, 2]) if (dst !== li) opts.push({ label: `FROM ${t.line} -> ${dst}: ${describeCard(state, t, ap)}`, t, dst });
+      for (const dst of [0, 1, 2]) if (dst !== li) opts.push({ label: `FROM L${t.line} → L${dst} (${sideTag}): ${describeCard(state, t, ap)}`, t, dst });
     } else {
-      opts.push({ label: `TO ${li} <- ${t.line}: ${describeCard(state, t, ap)}`, t, dst: li });
+      opts.push({ label: `TO L${li} ← L${t.line} (${sideTag}): ${describeCard(state, t, ap)}`, t, dst: li });
     }
   }
   if (opts.length === 0) return;
@@ -691,9 +699,16 @@ register(MIDDLE_EFFECTS, "MN01:Gravity:6", function* (state, ap, li) {
 // LIFE (MN01)
 // ---------------------------------------------------------------------------
 
-register(MIDDLE_EFFECTS, "MN01:Life:0", function* (state, ap) {
-  for (let ln = 0; ln < NUM_LINES; ln++) {
-    if (lineStack(state.lines[ln], ap).length > 0) playTopDeckFaceDown(state, ap, ln);
+register(MIDDLE_EFFECTS, "MN01:Life:0", function* (state, ap, li, card) {
+  // Codex p.9: "If Life 0 gets covered during this process, its middle
+  // command stops." Notes lines first; processes one line at a time
+  // with consequences before next; short-circuits if Life 0 leaves the
+  // field or is no longer uncovered on owner's side.
+  const linesToPlay = [0, 1, 2].filter((ln) => lineStack(state.lines[ln], ap).length > 0);
+  for (const ln of linesToPlay) {
+    const ownerStack = lineStack(state.lines[li], ap);
+    if (ownerStack.length === 0 || ownerStack[ownerStack.length - 1] !== card) return;
+    playTopDeckFaceDown(state, ap, ln);
   }
   if (false) yield {} as Choice;
 });
@@ -803,7 +818,11 @@ register(MIDDLE_EFFECTS, "MN01:Light:2", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN01:Light:3", function* (state, ap, li) {
-  // Shift all face-down cards in this line to another line.
+  // Shift all face-down cards in this line to another line. Codex p.9:
+  // "The face-down cards shifted by Light 3 maintain the same relative
+  // positioning in their stacks." Iterate bottom→top and re-lookup each
+  // card's current position before shifting so the destination accumulates
+  // bottom→top in source order.
   const otherLines = [0, 1, 2].filter((l) => l !== li);
   if (otherLines.length === 0) return;
   const didx: number = yield {
@@ -813,11 +832,11 @@ register(MIDDLE_EFFECTS, "MN01:Light:3", function* (state, ap, li) {
   const dst = otherLines[didx];
   if (dst == null) return;
   for (const pl of [0, 1] as PlayerIndex[]) {
-    const stack = lineStack(state.lines[li], pl);
-    const positions: number[] = [];
-    stack.forEach((c, i) => { if (!c.faceUp) positions.push(i); });
-    for (let i = positions.length - 1; i >= 0; i--) {
-      shiftCard(state, li, pl, positions[i], dst);
+    const fdCards = lineStack(state.lines[li], pl).filter((c) => !c.faceUp);
+    for (const c of fdCards) {
+      const curS = lineStack(state.lines[li], pl);
+      const pos = curS.indexOf(c);
+      if (pos >= 0) shiftCard(state, li, pl, pos, dst);
     }
   }
 });
@@ -906,15 +925,26 @@ register(MIDDLE_EFFECTS, "MN01:Plague:2", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN01:Plague:3", function* (state, ap, li, card) {
+  // Errata 9/2025: "Flip each other uncovered face-up card." Codex p.9:
+  // "this only affects uncovered cards" + owner notes the set first,
+  // then processes one at a time. Uses flipCard (not raw face_up
+  // assignment) so flip triggers / Ice 4 immunity / when-covered hooks
+  // all behave correctly.
+  type E = { line: number; player: PlayerIndex; card: CardInst };
+  const eligible: E[] = [];
   for (let ln = 0; ln < NUM_LINES; ln++) {
     for (const pl of [0, 1] as PlayerIndex[]) {
       const stack = lineStack(state.lines[ln], pl);
-      // "each" semantics: uncovered face-up only
       if (stack.length === 0) continue;
       const top = stack[stack.length - 1];
       if (top === card || !top.faceUp) continue;
-      top.faceUp = false;
+      eligible.push({ line: ln, player: pl, card: top });
     }
+  }
+  for (const e of eligible) {
+    const curS = lineStack(state.lines[e.line], e.player);
+    const pos = curS.indexOf(e.card);
+    if (pos >= 0) flipCard(state, e.line, e.player, pos);
   }
   if (false) yield {} as Choice;
 });
@@ -1176,21 +1206,29 @@ register(MIDDLE_EFFECTS, "MN01:Water:0", function* (state, ap, li, card) {
   card.faceUp = !card.faceUp;
 });
 
-register(MIDDLE_EFFECTS, "MN01:Water:1", function* (state, ap, li) {
-  for (let ln = 0; ln < NUM_LINES; ln++) {
-    if (ln === li) continue;
+register(MIDDLE_EFFECTS, "MN01:Water:1", function* (state, ap, li, card) {
+  // Play top of deck face-down in each OTHER line. Codex p.10 parallels
+  // Life 0's clarification — process one line at a time, bail if Water 1
+  // leaves the field mid-resolution.
+  const otherLines = [0, 1, 2].filter((ln) => ln !== li);
+  for (const ln of otherLines) {
+    if (!lineStack(state.lines[li], ap).includes(card)) return;
     playTopDeckFaceDown(state, ap, ln);
   }
   if (false) yield {} as Choice;
 });
 
 register(MIDDLE_EFFECTS, "MN01:Water:2", function* (state, ap) {
+  // Draw 2 cards. Rearrange your protocols. Codex p.4: "the end state
+  // of that rearrangement must be different from the start state."
   drawCards(state, ap, 2);
   const pairs: [number, number][] = [[0, 1], [0, 2], [1, 2]];
-  const options = pairs.map(([a, b]) => `swap L${a}<->L${b}`).concat(["no swap"]);
-  const targets = (pairs as ([number, number] | null)[]).concat([null]);
-  const idx: number = yield { prompt: "Rearrange your protocols", options, targets, optional: false, decider: ap };
-  if (idx < pairs.length) {
+  const options = pairs.map(([a, b]) => `swap L${a}<->L${b}`);
+  const idx: number = yield {
+    prompt: "Rearrange your protocols (must swap a pair)",
+    options, targets: pairs, optional: false, decider: ap,
+  };
+  if (idx >= 0 && idx < pairs.length) {
     const [a, b] = pairs[idx];
     const ps = state.players[ap];
     [ps.protocols[a], ps.protocols[b]] = [ps.protocols[b], ps.protocols[a]];
@@ -1285,14 +1323,18 @@ register(START_EFFECTS, "MN02:Chaos:0", function* (state, ap, li, card) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Chaos:1", function* (state, ap) {
+  // Rearrange your protocols. Rearrange opp's protocols.
+  // Codex p.13: "You must make a change to the protocols of both
+  // players." + Codex p.4 "the end state of that rearrangement must be
+  // different from the start state" — no "no swap" option offered.
+  const pairs: [number, number][] = [[0, 1], [0, 2], [1, 2]];
   for (const who of [ap, (ap === 0 ? 1 : 0) as PlayerIndex] as PlayerIndex[]) {
-    const pairs: [number, number][] = [[0, 1], [0, 2], [1, 2]];
-    const opts = pairs.map(([a, b]) => `swap P${who} L${a}<->L${b}`).concat(["no swap"]);
+    const opts = pairs.map(([a, b]) => `swap P${who} L${a}<->L${b}`);
     const idx: number = yield {
-      prompt: `Rearrange P${who}'s protocols`,
-      options: opts, targets: [...pairs, null], optional: false, decider: ap,
+      prompt: `Rearrange P${who}'s protocols (must change)`,
+      options: opts, targets: pairs, optional: false, decider: ap,
     };
-    if (idx < pairs.length) {
+    if (idx >= 0 && idx < pairs.length) {
       const [a, b] = pairs[idx];
       const ps = state.players[who];
       [ps.protocols[a], ps.protocols[b]] = [ps.protocols[b], ps.protocols[a]];
@@ -1886,6 +1928,11 @@ register(MIDDLE_EFFECTS, "MN02:Luck:3", function* (state, ap, li, card) {
   const top = psOpp.deck.pop()!;
   top.faceUp = true;
   state.players[top.owner].trash.push(top);
+  // Codex FAQ p.7: discarding from top of deck counts as a discard.
+  // Flag opp as discarder so after-discard triggers (Plague 1, War 3,
+  // Peace 4, etc.) fire.
+  const { flagAfterDiscard } = require("./helpers");
+  flagAfterDiscard(state, opp);
   if (CARD_DEFS[top.defId].protocol !== stated) return;
   const targets = enumerateUncovered(state, { exclude: card, activePlayer: ap });
   if (targets.length === 0) return;
@@ -1959,13 +2006,19 @@ register(END_EFFECTS, "MN02:Mirror:1", function* (state, ap, li, card) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Mirror:2", function* (state, ap) {
-  const pairs: [number, number][] = [[0, 1], [0, 2], [1, 2]];
+  // Swap all of your cards in one stack with another of your stacks.
+  // Codex p.13: "A stack must have at least 1 card in it to swap." +
+  // Codex p.4 "end state must differ" — filter pairs to those where at
+  // least one stack is non-empty.
+  const allPairs: [number, number][] = [[0, 1], [0, 2], [1, 2]];
+  const pairs = allPairs.filter(([a, b]) => state.lines[a][ap === 0 ? "p0Stack" : "p1Stack"].length > 0 || state.lines[b][ap === 0 ? "p0Stack" : "p1Stack"].length > 0);
+  if (pairs.length === 0) return;
   const idx: number = yield {
     prompt: "Swap which two of your stacks?",
-    options: pairs.map(([a, b]) => `L${a}<->L${b}`).concat(["no swap"]),
-    targets: [...pairs, null], optional: false, decider: ap,
+    options: pairs.map(([a, b]) => `L${a}<->L${b}`),
+    targets: pairs, optional: false, decider: ap,
   };
-  if (idx >= pairs.length) return;
+  if (idx < 0 || idx >= pairs.length) return;
   const [a, b] = pairs[idx];
   const lineA = state.lines[a];
   const lineB = state.lines[b];
@@ -1977,13 +2030,19 @@ register(MIDDLE_EFFECTS, "MN02:Mirror:2", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Mirror:3", function* (state, ap, li, card) {
-  const own = enumerateUncovered(state, { owner: "self", exclude: card, activePlayer: ap });
+  // Flip 1 of your cards. Flip 1 of opp's cards in the same line.
+  // Codex p.13: "If Mirror 3 flips itself first, the second flip doesn't
+  // happen." Mirror 3 IS a valid first-flip target; short-circuit the
+  // second clause if Mirror 3 went face-down.
+  const own = enumerateUncovered(state, { owner: "self", activePlayer: ap });
   if (own.length === 0) return;
   yield* chooseFieldTarget("Flip 1 of your cards", own, state, ap);
   const i = state.scratch["_last_target_idx"] as number | undefined;
   if (i == null || !own[i]) return;
   const t = own[i];
   flipCard(state, t.line, t.player, t.pos);
+  // If Mirror 3 self-flipped (now face-down), the second flip doesn't happen.
+  if (!card.faceUp) return;
   const oppIn = enumerateUncovered(state, { owner: "opponent", lineFilter: t.line, activePlayer: ap });
   if (oppIn.length === 0) return;
   yield* chooseFieldTarget("Flip 1 opp card in same line", oppIn, state, ap);
