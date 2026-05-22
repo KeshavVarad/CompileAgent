@@ -696,27 +696,12 @@ class Game:
         self._play_card(player, hand_index, line_index, face_up=face_up)
 
     def _do_refresh(self, player: int) -> None:
-        # Routed through `refresh_player` (not raw draw_cards) so the
-        # post-refresh event flag is set — otherwise `@after_self_refresh`
-        # / `@after_opp_refresh` / `@after_any_refresh` would never fire
-        # for the player's own REFRESH action (only when card effects
-        # trigger a refresh).
-        #
-        # If the active player holds the control component, Codex p.5
-        # requires the rearrange-protocols prompt to resolve *before*
-        # the refresh draws happen. We push two generators in LIFO
-        # reverse order so the rearrange drains first, then the refresh
-        # finalizer runs the draws + sets the post-refresh flag.
-        from .effects import refresh_player, _control_rearrange_gen
-        if self.state.control_holder == player:
-            def _refresh_after_control():
-                refresh_player(self.state, player)
-                if False:
-                    yield
-            self._push_effect(_refresh_after_control())
-            self._push_effect(_control_rearrange_gen(self.state, player))
-        else:
-            refresh_player(self.state, player)
+        # `refresh_player` is now a generator (it yields the
+        # control-rearrange prompt when `player` holds the control
+        # component). Push it onto _pending; the engine drains it
+        # immediately after this action returns.
+        from .effects import refresh_player
+        self._push_effect(refresh_player(self.state, player))
 
     def _play_card(self, player: int, hand_index: int, line_index: int, face_up: bool) -> None:
         """Per Compile Codex (16 Dec 2024): the played card is committed
