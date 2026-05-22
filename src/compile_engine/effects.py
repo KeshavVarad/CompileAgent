@@ -123,6 +123,19 @@ def compute_line_value(state: GameState, line_idx: int, player: int) -> int:
         if d.protocol == "Clarity" and d.value == 0:
             total += hand_size
 
+    # Diversity 3 top (own side, AX02): +2 if there are any non-Diversity
+    # face-up cards in THIS stack. The +2 applies per Diversity 3 instance.
+    has_non_div_faceup = any(
+        c.face_up and defs[c.def_id].protocol != "Diversity" for c in stack
+    )
+    if has_non_div_faceup:
+        for c in stack:
+            if not c.face_up:
+                continue
+            d = defs[c.def_id]
+            if d.protocol == "Diversity" and d.value == 3:
+                total += 2
+
     return max(total, 0)
 
 
@@ -439,14 +452,16 @@ def _control_rearrange_gen(state: GameState, ap: int):
 # ---------------------------------------------------------------------------
 
 def _is_shift_targetable_while_covered(state: GameState, c: CardInst) -> bool:
-    """Speed 2 / Spirit 3 top: shift effects may target this card even when
-    it is covered, so long as it's face-up (otherwise its top isn't active)."""
+    """Speed 2 / Spirit 3 / Unity 1 top: shift effects may target this
+    card even when it is covered, so long as it's face-up (otherwise its
+    top isn't active)."""
     if not c.face_up:
         return False
     d = state.defs[c.def_id]
     return (
         (d.protocol == "Speed" and d.value == 2)
         or (d.protocol == "Spirit" and d.value == 3)
+        or (d.protocol == "Unity" and d.value == 1)
     )
 
 
@@ -780,6 +795,25 @@ def player_may_play_any_line_faceup(state: GameState, player: int) -> bool:
             if d.protocol == "Spirit" and d.value == 1:
                 return True
     return False
+
+
+def unity_card_may_be_played_faceup_in_line(
+    state: GameState, player: int, line_idx: int, played_protocol: str
+) -> bool:
+    """Unity 1 bottom: 'Unity cards may be played face-up in this line.'
+    Active while Unity 1 is face-up + uncovered on `player`'s side of
+    `line_idx`. Allows face-up play of Unity-protocol cards without the
+    usual protocol-match restriction."""
+    if played_protocol != "Unity":
+        return False
+    stack = state.lines[line_idx].stack(player)
+    if not stack:
+        return False
+    top = stack[-1]
+    if not top.face_up:
+        return False
+    d = state.defs[top.def_id]
+    return d.protocol == "Unity" and d.value == 1
 
 
 def player_skips_check_cache(state: GameState, player: int) -> bool:
@@ -4246,6 +4280,194 @@ def _diversity_0_bottom(state, ap, li, card):
 # ---------------------------------------------------------------------------
 # Convenience: bulk-lookup wrappers (called from game.py)
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# AX02 — Assimilation 0 / 2, Diversity 1 / 4, Unity 1 / 2 / 4
+# (Diversity 3 top, Unity 1 top + bottom, Ice 4 bottom are passive — see
+# compute_line_value, _is_shift_targetable_while_covered,
+# unity_card_may_be_played_faceup_in_line, and flip_card respectively.)
+# ---------------------------------------------------------------------------
+
+@middle("AX02:Assimilation:0")
+def _assim_0(state, ap, li, card):
+    # M: Put one of your opponent's covered or uncovered field cards
+    # directly into your hand. The "covered or uncovered" wording
+    # overrides default uncovered-only targeting (Codex p.3).
+    opp = state.opponent(ap)
+    targets: list[tuple[int, int, int, CardInst]] = []
+    for ln in range(NUM_LINES):
+        s = state.lines[ln].stack(opp)
+        for pos, c in enumerate(s):
+            if c.is_committed:
+                continue
+            targets.append((ln, opp, pos, c))
+    if not targets:
+        return
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
+    idx = yield Choice(prompt="Steal 1 opp field card into your hand",
+                       options=opts, targets=targets, decider=ap)
+    if not (0 <= idx < len(targets)):
+        return
+    sln, spl, spos, c = targets[idx]
+    src_stack = state.lines[sln].stack(spl)
+    was_top = spos == len(src_stack) - 1
+    src_stack.pop(spos)
+    c.owner = ap
+    c.face_up = False  # cards in hand are face-down.
+    state.players[ap].hand.append(c)
+    # Removing the top exposes the new top → fire uncover on opp side
+    # (mirrors delete/return semantics).
+    if was_top and src_stack and src_stack[-1].face_up:
+        state.triggers.append(("uncover", sln, spl, src_stack[-1]))
+    _check_diversity_6_self_destruct(state)
+
+
+@bottom_on_play("AX02:Assimilation:2")
+def _assim_2_bottom(state, ap, li, card):
+    # B: Play the top card of your opponent's deck face down in this
+    # stack (ap's side of `li`).
+    opp = state.opponent(ap)
+    ps_opp = state.players[opp]
+    if not ps_opp.deck:
+        if ps_opp.trash:
+            ps_opp.deck = ps_opp.trash
+            ps_opp.trash = []
+            state.rng.shuffle(ps_opp.deck)
+    if not ps_opp.deck:
+        return
+    c = ps_opp.deck.pop()
+    c.owner = ap  # ownership transfers when played on ap's side
+    c.face_up = False
+    state.lines[li].stack(ap).append(c)
+    if False:
+        yield  # pragma: no cover
+
+
+def _distinct_protocols_in_line(state: GameState, line_idx: int) -> int:
+    """Count of distinct protocols on FACE-UP cards in this line, both
+    sides. Face-down cards don't contribute (their protocol is unknown
+    in public game state)."""
+    protos: set[str] = set()
+    for c in _cards_in_line_both(state, line_idx):
+        if c.face_up:
+            protos.add(state.defs[c.def_id].protocol)
+    return len(protos)
+
+
+def _distinct_protocols_in_field(state: GameState) -> int:
+    """Count of distinct protocols on FACE-UP cards across the full field."""
+    protos: set[str] = set()
+    for ln in range(NUM_LINES):
+        for c in _cards_in_line_both(state, ln):
+            if c.face_up:
+                protos.add(state.defs[c.def_id].protocol)
+    return len(protos)
+
+
+@middle("AX02:Diversity:1")
+def _diversity_1(state, ap, li, card):
+    # M: Shift 1 uncovered card, then draw cards equal to the number of
+    # different protocols on cards in this line.
+    targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
+    if targets:
+        opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
+        idx = yield Choice(prompt="Shift 1 uncovered card",
+                           options=opts, targets=targets, decider=ap)
+        if 0 <= idx < len(targets):
+            sln, spl, spos, _ = targets[idx]
+            dests = [i for i in range(NUM_LINES) if i != sln]
+            didx = yield Choice(prompt="To which line?",
+                                options=[str(i) for i in dests], targets=dests,
+                                decider=ap)
+            if 0 <= didx < len(dests):
+                shift_card(state, sln, spl, spos, dests[didx])
+    # Then draw N = distinct face-up protocols in this line.
+    n = _distinct_protocols_in_line(state, li)
+    if n > 0:
+        draw_cards(state, ap, n)
+
+
+@middle("AX02:Diversity:4")
+def _diversity_4(state, ap, li, card):
+    # M: Flip 1 uncovered card with a value less than the number of
+    # different protocols on face-up cards in the field.
+    threshold = _distinct_protocols_in_field(state)
+    if threshold <= 0:
+        return
+    targets = [
+        t for t in _enumerate_uncovered(state, exclude=card, active_player=ap)
+        if t[3].value(state.defs) < threshold
+    ]
+    if not targets:
+        return
+    opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
+    idx = yield Choice(prompt=f"Flip 1 uncovered card with value < {threshold}",
+                       options=opts, targets=targets, decider=ap)
+    if 0 <= idx < len(targets):
+        sln, spl, spos, _ = targets[idx]
+        flip_card(state, sln, spl, spos)
+
+
+@middle("AX02:Unity:1")
+def _unity_1(state, ap, li, card):
+    # M: If there are 5 or more Unity cards in the field, flip the Unity
+    # protocol to the compiled side and delete all cards in that line.
+    # (Note: there is no concept of "rearrange protocols" here — only flip
+    # Unity to compiled. Then delete all cards in Unity 1's current line.)
+    if _count_unity_in_field(state) < 5:
+        return
+    # Find Unity in ap's protocols.
+    ps = state.players[ap]
+    unity_lines = [i for i, p in enumerate(ps.protocols) if p == "Unity"]
+    if not unity_lines:
+        return
+    unity_line = unity_lines[0]
+    # Flip Unity protocol to compiled side.
+    ps.compiled[unity_line] = True
+    # Delete all cards in THAT line (Unity protocol's line), both sides.
+    for pl in (0, 1):
+        for c in state.lines[unity_line].stack(pl):
+            c.face_up = True
+            state.players[c.owner].trash.append(c)
+        if pl == 0:
+            state.lines[unity_line].p0_stack = []
+        else:
+            state.lines[unity_line].p1_stack = []
+    _check_diversity_6_self_destruct(state)
+    if False:
+        yield  # pragma: no cover
+
+
+@middle("AX02:Unity:2")
+def _unity_2(state, ap, li, card):
+    # M: Draw cards equal to the number of Unity cards in the field.
+    n = _count_unity_in_field(state)
+    if n > 0:
+        draw_cards(state, ap, n)
+    if False:
+        yield  # pragma: no cover
+
+
+@bottom_on_play("AX02:Unity:4")
+def _unity_4_bottom(state, ap, li, card):
+    # B: If your hand is empty, reveal your deck, draw all Unity cards
+    # from it, then shuffle your deck. (Reveal is informational; we
+    # implicitly know what's in the deck.)
+    if state.players[ap].hand:
+        return
+    ps = state.players[ap]
+    unity_cards = [c for c in ps.deck if state.defs[c.def_id].protocol == "Unity"]
+    if not unity_cards:
+        return
+    state.log.append(f"P{ap} revealed deck: drew {len(unity_cards)} Unity card(s)")
+    for c in unity_cards:
+        ps.deck.remove(c)
+        ps.hand.append(c)
+    state.rng.shuffle(ps.deck)
+    _flag_after_shuffle(state, ap)
+    if False:
+        yield  # pragma: no cover
+
 
 def get_effect(card_def):
     """Backwards-compat alias used by older tests; returns middle effect."""

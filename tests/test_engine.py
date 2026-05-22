@@ -135,6 +135,9 @@ def test_effect_coverage_mn01_ax01():
         AFTER_SELF_DRAW_EFFECTS, AFTER_SELF_SHUFFLE_EFFECTS,
         AFTER_SELF_REFRESH_EFFECTS, FLIP_TRIGGER_EFFECTS,
         WHEN_DELETED_BY_COMPILE_EFFECTS,
+        AFTER_OPP_DRAW_EFFECTS, AFTER_OPP_REFRESH_EFFECTS,
+        AFTER_OPP_COMPILE_EFFECTS, AFTER_ANY_REFRESH_EFFECTS,
+        AFTER_OPP_PLAY_IN_LINE_EFFECTS, AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS,
     )
     defs = load_card_defs()
     passive_only_keys = {
@@ -166,6 +169,12 @@ def test_effect_coverage_mn01_ax01():
             or d.key in AFTER_SELF_REFRESH_EFFECTS
             or d.key in FLIP_TRIGGER_EFFECTS
             or d.key in WHEN_DELETED_BY_COMPILE_EFFECTS
+            or d.key in AFTER_OPP_DRAW_EFFECTS
+            or d.key in AFTER_OPP_REFRESH_EFFECTS
+            or d.key in AFTER_OPP_COMPILE_EFFECTS
+            or d.key in AFTER_ANY_REFRESH_EFFECTS
+            or d.key in AFTER_OPP_PLAY_IN_LINE_EFFECTS
+            or d.key in AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS
         )
         has_text = bool(d.top_text or d.middle_text or d.bottom_text)
         if has_text and not has_effect and d.key not in passive_only_keys:
@@ -198,6 +207,9 @@ def test_effect_coverage_all_180_cards():
         AFTER_SELF_DRAW_EFFECTS, AFTER_SELF_SHUFFLE_EFFECTS,
         AFTER_SELF_REFRESH_EFFECTS, FLIP_TRIGGER_EFFECTS,
         WHEN_DELETED_BY_COMPILE_EFFECTS,
+        AFTER_OPP_DRAW_EFFECTS, AFTER_OPP_REFRESH_EFFECTS,
+        AFTER_OPP_COMPILE_EFFECTS, AFTER_ANY_REFRESH_EFFECTS,
+        AFTER_OPP_PLAY_IN_LINE_EFFECTS, AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS,
     )
     defs = load_card_defs()
     passive_only_keys = {
@@ -215,6 +227,9 @@ def test_effect_coverage_all_180_cards():
         "MN02:Chaos:3",       # may play without matching protocols (legal_actions)
         "MN02:Fear:0",        # T: suppress opp middles (middle_suppressed)
         "MN02:Ice:6",         # T: no draw with hand (draw_cards)
+        # AX02 — passive
+        "MN02:Ice:4",         # B: cannot be flipped (flip_card immunity)
+        "AX02:Diversity:3",   # T: +2 value if non-Diversity face-up in stack (compute_line_value)
     }
     missing = []
     for d in defs:
@@ -235,6 +250,12 @@ def test_effect_coverage_all_180_cards():
             or d.key in AFTER_SELF_REFRESH_EFFECTS
             or d.key in FLIP_TRIGGER_EFFECTS
             or d.key in WHEN_DELETED_BY_COMPILE_EFFECTS
+            or d.key in AFTER_OPP_DRAW_EFFECTS
+            or d.key in AFTER_OPP_REFRESH_EFFECTS
+            or d.key in AFTER_OPP_COMPILE_EFFECTS
+            or d.key in AFTER_ANY_REFRESH_EFFECTS
+            or d.key in AFTER_OPP_PLAY_IN_LINE_EFFECTS
+            or d.key in AFTER_SELF_DISCARD_ON_OPP_TURN_EFFECTS
         )
         has_text = bool(d.top_text or d.middle_text or d.bottom_text)
         if has_text and not has_effect and d.key not in passive_only_keys:
@@ -1152,6 +1173,120 @@ def test_assim_1_fires_on_either_player_refresh():
     assert len(g.state.players[1].trash) > pre_p1_trash, (
         f"Assim 1 should fire on owner's own refresh; "
         f"P1 trash: {pre_p1_trash} -> {len(g.state.players[1].trash)}"
+    )
+
+
+def test_diversity_3_top_adds_2_value_when_non_diversity_in_stack():
+    """Diversity 3 top (AX02): 'Your total value in this line is
+    increased by 2 if there are any non-Diversity face-up cards in this
+    stack.' Verify the +2 fires only when the condition holds."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import compute_line_value
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=60, include_aux2=True))
+    g.set_predetermined_draft([["Diversity", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    div3 = next(d for d in defs if d.key == "AX02:Diversity:3")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")  # non-Diversity
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # Only a face-up Diversity 3 in line 0 — no non-Diversity in stack, no bonus.
+    div3_inst = CardInst(inst_id=60001, def_id=div3.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [div3_inst]
+    val_alone = compute_line_value(g.state, 0, 0)
+    assert val_alone == div3.value, (
+        f"Diversity 3 alone (no non-Div in stack): expected {div3.value}, got {val_alone}"
+    )
+    # Add a face-up Fire 0 below Diversity 3 → non-Div present → +2.
+    g.state.lines[0].p0_stack = [
+        CardInst(inst_id=60002, def_id=fire_0.def_id, owner=0, face_up=True),
+        div3_inst,
+    ]
+    val_combo = compute_line_value(g.state, 0, 0)
+    expected_combo = fire_0.value + div3.value + 2
+    assert val_combo == expected_combo, (
+        f"Diversity 3 + Fire 0 face-up in stack: expected {expected_combo}, got {val_combo}"
+    )
+
+
+def test_unity_2_draws_per_unity_in_field():
+    """Unity 2 middle (AX02): 'Draw cards equal to the number of Unity
+    cards in the field.'"""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=61, include_aux2=True))
+    g.set_predetermined_draft([["Unity", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    unity_2 = next(d for d in defs if d.key == "AX02:Unity:2")
+    unity_0 = next(d for d in defs if d.key == "AX02:Unity:0")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # 2 Unity cards already on field; play Unity 2 → 3 Unity total → draw 3.
+    g.state.lines[1].p0_stack = [
+        CardInst(inst_id=61001, def_id=unity_0.def_id, owner=0, face_up=True),
+    ]
+    g.state.lines[2].p1_stack = [
+        CardInst(inst_id=61002, def_id=unity_0.def_id, owner=1, face_up=True),
+    ]
+    unity_2_inst = CardInst(inst_id=61003, def_id=unity_2.def_id, owner=0, face_up=False)
+    g.state.players[0].hand = [unity_2_inst]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=61100 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    pre_deck = len(g.state.players[0].deck)
+    g.step(Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # After play, Unity 2 itself is on the field (3 total Unity cards
+    # counted including itself, per Codex 'in the field'). Drew 3.
+    assert len(g.state.players[0].deck) == pre_deck - 3, (
+        f"expected to draw 3 (= # Unity in field including Unity 2); "
+        f"deck went {pre_deck} → {len(g.state.players[0].deck)}"
+    )
+
+
+def test_assim_0_steals_covered_opp_card():
+    """Assim 0 middle (AX02): 'Put one of your opponent's covered or
+    uncovered field cards directly into your hand.' Verify covered opp
+    cards are valid targets (default targeting is overridden by
+    'covered or uncovered')."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import MIDDLE_EFFECTS
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=62, include_aux2=True))
+    g.set_predetermined_draft([["Assimilation", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    assim_0 = next(d for d in defs if d.key == "AX02:Assimilation:0")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P1 has covered Fire 0 face-up + face-down on top in line 1.
+    covered_card = CardInst(inst_id=62001, def_id=fire_0.def_id, owner=1, face_up=True)
+    fd_top = CardInst(inst_id=62002, def_id=fire_0.def_id, owner=1, face_up=False)
+    g.state.lines[1].p1_stack = [covered_card, fd_top]
+    assim_inst = CardInst(inst_id=62003, def_id=assim_0.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [assim_inst]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    gen = MIDDLE_EFFECTS["AX02:Assimilation:0"](g.state, 0, 0, assim_inst)
+    choice = next(gen)
+    # Both the covered face-up AND the top face-down should be in targets.
+    assert len(choice.targets) == 2, (
+        f"Assim 0 should target both covered and uncovered opp cards; got {len(choice.targets)} targets"
     )
 
 
