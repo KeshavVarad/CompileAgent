@@ -550,7 +550,7 @@ class Game:
         # themselves out, escaping the compile. We collect interrupts now,
         # push them as effects, and queue a finalizer that runs the bulk
         # delete + protocol flip once interrupts resolve.
-        from .effects import get_when_deleted_by_compile_effect
+        from .effects import get_when_deleted_by_compile_effect, _control_rearrange_gen
         interrupts: list[tuple[int, CardInst, object]] = []
         for pl in (0, 1):
             for c in st.lines[ln].stack(pl):
@@ -561,16 +561,25 @@ class Game:
                 if fn is not None:
                     interrupts.append((pl, c, fn))
 
-        if not interrupts:
+        ap = st.current_player
+        has_control = st.control_holder == ap
+
+        if not interrupts and not has_control:
             self._compile_finalize(action)
             return
 
-        ap = st.current_player
-        # Push finalizer first (drains last). Then interrupts in reverse so
-        # the first listed drains first under LIFO.
+        # Codex p.5: "first the control component is returned to its neutral
+        # position and that player may rearrange one player's protocols —
+        # either theirs or their opponent's — then they complete their
+        # compile". LIFO push order (drain forward):
+        #   1. control_rearrange (drains first)
+        #   2. when_deleted_by_compile interrupts (Speed 2 etc.)
+        #   3. compile_finalizer (drains last — bulk delete + protocol flip)
         self._push_effect(self._compile_finalizer_gen(action))
         for pl, c, fn in reversed(interrupts):
             self._push_effect(fn(st, ap, ln, c))
+        if has_control:
+            self._push_effect(_control_rearrange_gen(st, ap))
 
     def _compile_finalizer_gen(self, action: Action):
         """Generator wrapper that runs the bulk-delete + protocol flip
@@ -672,8 +681,22 @@ class Game:
         # / `@after_opp_refresh` / `@after_any_refresh` would never fire
         # for the player's own REFRESH action (only when card effects
         # trigger a refresh).
-        from .effects import refresh_player
-        refresh_player(self.state, player)
+        #
+        # If the active player holds the control component, Codex p.5
+        # requires the rearrange-protocols prompt to resolve *before*
+        # the refresh draws happen. We push two generators in LIFO
+        # reverse order so the rearrange drains first, then the refresh
+        # finalizer runs the draws + sets the post-refresh flag.
+        from .effects import refresh_player, _control_rearrange_gen
+        if self.state.control_holder == player:
+            def _refresh_after_control():
+                refresh_player(self.state, player)
+                if False:
+                    yield
+            self._push_effect(_refresh_after_control())
+            self._push_effect(_control_rearrange_gen(self.state, player))
+        else:
+            refresh_player(self.state, player)
 
     def _play_card(self, player: int, hand_index: int, line_index: int, face_up: bool) -> None:
         """Per Compile Codex (16 Dec 2024): the played card is committed

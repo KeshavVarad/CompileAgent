@@ -125,6 +125,49 @@ function* discardN(state: GameState, player: PlayerIndex, n: number): EffectGen 
   }
 }
 
+// Control component rearrange generator — yielded before compile/refresh
+// when ap holds the control component. Codex p.5-6: "first the control
+// component is returned to its neutral position and that player may
+// rearrange one player's protocols — either theirs or their opponent's
+// — then they complete their compile or refresh." Codex p.8: "the
+// control component resets to neutral even if you choose not to
+// rearrange any protocols."
+export function* controlRearrangeGen(state: GameState, ap: PlayerIndex): EffectGen {
+  if (state.controlHolder !== ap) return;
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const idx: number = yield {
+    prompt: "Control component — rearrange whose protocols? (or skip)",
+    options: [
+      `yours (P${ap + 1})`,
+      `opp's (P${opp + 1})`,
+      "skip (no rearrange)",
+    ],
+    targets: [ap, opp, -1],
+    optional: false,
+    decider: ap,
+  };
+  const targetPlayer: PlayerIndex | null = idx === 0 ? ap : idx === 1 ? opp : null;
+  if (targetPlayer !== null) {
+    const pairs: [number, number][] = [[0, 1], [0, 2], [1, 2]];
+    const opts = pairs.map(([a, b]) => `swap P${targetPlayer + 1} L${a}<->L${b}`);
+    const pidx: number = yield {
+      prompt: `Swap which two of P${targetPlayer + 1}'s protocols?`,
+      options: opts,
+      targets: pairs,
+      optional: false,
+      decider: ap,
+    };
+    if (pidx >= 0 && pidx < pairs.length) {
+      const [a, b] = pairs[pidx];
+      const ps = state.players[targetPlayer];
+      [ps.protocols[a], ps.protocols[b]] = [ps.protocols[b], ps.protocols[a]];
+      [ps.compiled[a], ps.compiled[b]] = [ps.compiled[b], ps.compiled[a]];
+    }
+  }
+  // Reset control component to neutral position unconditionally (Codex p.8).
+  state.controlHolder = null;
+}
+
 function* discardOptionalLoop(state: GameState, player: PlayerIndex, maxN: number): EffectGen {
   let discarded = 0;
   while (discarded < maxN && state.players[player].hand.length > 0) {
