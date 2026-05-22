@@ -1622,23 +1622,25 @@ register(END_EFFECTS, "MN02:Courage:2", function* (state, ap, li, card) {
 
 // Courage 3 bottom — "End: You may shift this card to the line where
 // opp has their highest total value." Fires only while uncovered.
+// Codex p.9: "Multiple lines can be tied for highest total value. In
+// this case, the player chooses."
 register(END_EFFECTS, "MN02:Courage:3", function* (state, ap, li, card) {
   const stack0 = lineStack(state.lines[li], ap);
   if (stack0.length === 0 || stack0[stack0.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const { computeLineValue } = require("./helpers");
-  let best = 0;
-  let bestV = -1;
-  for (let i = 0; i < 3; i++) {
-    const v = computeLineValue(state, i, opp);
-    if (v > bestV) { bestV = v; best = i; }
-  }
-  if (best === li) return;
+  const vals = [0, 1, 2].map((i) => computeLineValue(state, i, opp) as number);
+  const maxV = Math.max(...vals);
+  const dests = [0, 1, 2].filter((i) => vals[i] === maxV && i !== li);
+  if (dests.length === 0) return;
+  const opts = dests.map((i) => `L${i} (opp value ${vals[i]})`).concat(["skip"]);
+  const targets = (dests as number[]).concat([-1]);
   const idx: number = yield {
-    prompt: `(optional) Shift Courage 3 to L${best} (opp's strongest)`,
-    options: ["shift", "skip"], targets: [0, -1], optional: true, decider: ap,
+    prompt: "(optional) Shift Courage 3 to opp's strongest line",
+    options: opts, targets, optional: true, decider: ap,
   };
-  if (idx === -1 || idx === 1) return;
+  if (idx === -1 || idx < 0 || idx >= dests.length) return;
+  const best = dests[idx];
   const s = lineStack(state.lines[li], ap);
   const pos = s.indexOf(card);
   if (pos >= 0) shiftCard(state, li, ap, pos, best);
@@ -1927,6 +1929,10 @@ register(MIDDLE_EFFECTS, "MN02:Luck:4", function* (state, ap, li, card) {
 
 // Mirror 1 bottom — "End: You may resolve the middle command of 1 of
 // opp's cards as if it were on this card." Fires only while uncovered.
+// Codex p.3 default targeting: only uncovered cards. Codex p.9:
+// Mirror 1's bottom is blocked by Fear 0 — we honour this by filtering
+// targets through `middleSuppressed` (ap's own Fear 0 / Apathy 2 in the
+// target's line nullifies the copied middle).
 register(END_EFFECTS, "MN02:Mirror:1", function* (state, ap, li, card) {
   const ownStack = lineStack(state.lines[li], ap);
   if (ownStack.length === 0 || ownStack[ownStack.length - 1] !== card) return;
@@ -1934,11 +1940,14 @@ register(END_EFFECTS, "MN02:Mirror:1", function* (state, ap, li, card) {
   const targets: FieldTarget[] = [];
   for (let ln = 0; ln < 3; ln++) {
     const s = lineStack(state.lines[ln], opp);
-    s.forEach((c, pos) => {
-      if (!c.faceUp) return;
-      const d = CARD_DEFS[c.defId];
-      if (d.middleText) targets.push({ line: ln, player: opp, pos, card: c });
-    });
+    if (s.length === 0) continue;
+    const pos = s.length - 1;
+    const c = s[pos];  // uncovered = top of stack
+    if (!c.faceUp) continue;
+    const d = CARD_DEFS[c.defId];
+    if (!d.middleText) continue;
+    if (middleSuppressed(state, ln, c)) continue;
+    targets.push({ line: ln, player: opp, pos, card: c });
   }
   if (targets.length === 0) return;
   yield* chooseFieldTarget("(optional) Resolve opp middle as Mirror 1", targets, state, ap, true);
@@ -1993,11 +2002,29 @@ register(AFTER_OPP_DRAW_EFFECTS, "MN02:Mirror:4", function* (state, ap, li, card
 
 // ----- MN02: Peace ---------------------------------------------------------
 
-register(MIDDLE_EFFECTS, "MN02:Peace:1", function* (state) {
-  for (const pl of [0, 1] as PlayerIndex[]) {
+// Peace 1 middle — "Both players discard their hand." Codex p.9: "The
+// owner decides which player discards their hand first." Order matters
+// because after-discard triggers fire between the two batches.
+register(MIDDLE_EFFECTS, "MN02:Peace:1", function* (state, ap) {
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const hSelf = state.players[ap].hand.length;
+  const hOpp = state.players[opp].hand.length;
+  if (hSelf === 0 && hOpp === 0) return;
+  let first: PlayerIndex;
+  if (hSelf > 0 && hOpp > 0) {
+    const idx: number = yield {
+      prompt: "Which player discards their hand first?",
+      options: [`P${ap + 1} (you) first`, `P${opp + 1} (opp) first`],
+      targets: [ap, opp], optional: false, decider: ap,
+    };
+    first = (idx === 0 ? ap : opp);
+  } else {
+    first = hSelf > 0 ? ap : opp;
+  }
+  const order: PlayerIndex[] = [first, (1 - first) as PlayerIndex];
+  for (const pl of order) {
     while (state.players[pl].hand.length > 0) discardToTrash(state, pl, 0);
   }
-  if (false) yield {} as Choice;
 });
 
 // Peace 1 bottom — "End: If your hand is empty, draw 1 card." Fires
@@ -2435,6 +2462,10 @@ register(AFTER_ANY_REFRESH_EFFECTS, "AX02:Assimilation:1", function* (state, ap,
   const c = state.players[ap].hand.splice(idx, 1)[0];
   c.faceUp = true;
   state.players[opp].trash.push(c);
+  // Atypical discard destination — still a discard from ap's hand, so
+  // flag for after-discard triggers.
+  const { flagAfterDiscard } = require("./helpers");
+  flagAfterDiscard(state, ap);
 });
 
 register(MIDDLE_EFFECTS, "AX02:Assimilation:4", function* (state, ap) {

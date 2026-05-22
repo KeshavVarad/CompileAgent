@@ -2971,22 +2971,30 @@ def _courage_2_end(state, ap, li, card):
 
 # Courage 3 bottom — "End: You may shift this card to the line where
 # your opponent has their highest total value." Fires only while
-# uncovered.
+# uncovered. Codex p.9: "Multiple lines can be tied for highest total
+# value. In this case, the player chooses."
 @end_trigger("MN02:Courage:3")
 def _courage_3_end(state, ap, li, card):
     stack = state.lines[li].stack(ap)
     if not stack or stack[-1] is not card:
         return
     opp = state.opponent(ap)
-    best = max(range(NUM_LINES), key=lambda i: compute_line_value(state, i, opp))
-    if best == li:
+    vals = [compute_line_value(state, i, opp) for i in range(NUM_LINES)]
+    max_v = max(vals)
+    # Candidate destinations: lines tied for opp's highest total, excluding
+    # Courage 3's current line (shifting to current line is a no-op).
+    dests = [i for i in range(NUM_LINES) if vals[i] == max_v and i != li]
+    if not dests:
         return
+    opts = [f"L{i} (opp value {vals[i]})" for i in dests] + ["skip"]
+    targets = list(dests) + [-1]
     idx = yield Choice(
-        prompt=f"(optional) Shift Courage 3 to L{best} (opp's strongest line)",
-        options=["shift", "skip"], targets=[0, -1], optional=True, decider=ap,
+        prompt="(optional) Shift Courage 3 to opp's strongest line",
+        options=opts, targets=targets, optional=True, decider=ap,
     )
-    if idx == -1 or idx == 1:
+    if idx == -1 or not (0 <= idx < len(dests)):
         return
+    best = dests[idx]
     s = state.lines[li].stack(ap)
     if card in s:
         shift_card(state, li, ap, s.index(card), best)
@@ -3342,18 +3350,29 @@ def _mirror_1_end(state, ap, li, card):
     stack = state.lines[li].stack(ap)
     if not stack or stack[-1] is not card:
         return
-    # v1 approximation: choose an opp face-up card with a middle, then
-    # trigger its middle effect with `card` as the active card.
+    # Choose an UNCOVERED opp card whose middle is not currently suppressed,
+    # then resolve its middle with Mirror 1 as the active card.
+    # Codex p.3: default targeting selects only uncovered cards.
+    # Codex p.9: Mirror 1's bottom text "is blocked by Fear 0 because the
+    # text is treated 'as if it were' [a middle]." We honour that by
+    # filtering targets through `middle_suppressed` — if the opp card's
+    # middle is currently suppressed (ap's own Fear 0 / Apathy 2 in line)
+    # it can't be copied.
     opp = state.opponent(ap)
     targets: list[tuple[int, int, int, CardInst]] = []
     for ln in range(NUM_LINES):
         s = state.lines[ln].stack(opp)
-        for pos, c in enumerate(s):
-            if not c.face_up:
-                continue
-            d = state.defs[c.def_id]
-            if d.middle_text:
-                targets.append((ln, opp, pos, c))
+        if not s:
+            continue
+        c = s[-1]  # uncovered = top of stack
+        if not c.face_up:
+            continue
+        d = state.defs[c.def_id]
+        if not d.middle_text:
+            continue
+        if middle_suppressed(state, ln, c):
+            continue
+        targets.append((ln, opp, len(s) - 1, c))
     if not targets:
         return
     opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
@@ -3431,12 +3450,28 @@ def _mirror_4_after_opp_draw(state, ap, li, card):
 
 @middle("MN02:Peace:1")
 def _peace_1(state, ap, li, card):
-    # Both players discard their hand.
-    for pl in (0, 1):
+    # Both players discard their hand. Codex p.9: "The owner decides
+    # which player discards their hand first." Order matters because
+    # after-discard triggers (Plague 1 top, Peace 4, War 3 etc.) resolve
+    # between the two discard batches.
+    opp = state.opponent(ap)
+    h_self = len(state.players[ap].hand)
+    h_opp = len(state.players[opp].hand)
+    if h_self == 0 and h_opp == 0:
+        return
+    if h_self > 0 and h_opp > 0:
+        first_idx = yield Choice(
+            prompt="Which player discards their hand first?",
+            options=[f"P{ap + 1} (you) first", f"P{opp + 1} (opp) first"],
+            targets=[ap, opp], decider=ap,
+        )
+        first = ap if first_idx == 0 else opp
+    else:
+        first = ap if h_self > 0 else opp
+    order = [first, 1 - first]
+    for pl in order:
         while state.players[pl].hand:
             discard_to_trash(state, pl, 0)
-    if False:
-        yield None  # type: ignore[misc]
 
 
 # Peace 1 bottom — "End: If your hand is empty, draw 1 card." Fires only
@@ -3931,6 +3966,10 @@ def _assim_1_after_any_refresh(state, ap, li, card):
     c = state.players[ap].hand.pop(idx)
     c.face_up = True
     state.players[opp].trash.append(c)
+    # This is a discard from `ap`'s hand (atypically destined to opp's
+    # trash). Flag it so `@after_self_discard` / `@after_opp_discard` /
+    # `@after_self_discard_on_opp_turn` triggers fire correctly.
+    _flag_after_discard(state, ap)
 
 
 @middle("AX02:Assimilation:4")
