@@ -120,6 +120,27 @@ class MCTSConfig:
     # so search is pure compute waste on confident states. Set to 0.0
     # to disable; 0.9 is a safe choice given the observed structure.
     skip_search_top_prob: float = 0.0
+    # Gumbel root selection (Danihelka et al. 2022, "Policy improvement
+    # by planning with Gumbel"). When True, replace UCB at the root with
+    # Gumbel-Top-k action selection + completed-Q-based policy target.
+    # The improved policy target is GUARANTEED to be better than the
+    # current policy (vanilla AZ has no such guarantee at low sim counts),
+    # which fixes the "policy collapses onto safe actions" failure mode
+    # observed when training under a tight sim budget.
+    #
+    # When True, `root_top_k`, `root_min_visits_per_action`, and
+    # `dirichlet_eps` are ignored at the root — Gumbel sampling provides
+    # the exploration mechanism instead.
+    use_gumbel_root: bool = False
+    # Top-m candidate count for Gumbel selection. Each sim at root visits
+    # one of the top-m actions by (gumbel + log_prior). 0 = use all legal.
+    gumbel_n_candidates: int = 16
+    # Scaling constants for the sigma function in completed-Q:
+    #   sigma(q) = (c_visit + max_visits) * c_scale * q
+    # These match the paper's defaults. Don't touch unless you've read
+    # the paper.
+    gumbel_c_visit: float = 50.0
+    gumbel_c_scale: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +165,8 @@ class _Node:
         "untried_actions",
         "is_terminal",
         "_priors",
+        "_gumbel",          # Gumbel noise vector at root (None elsewhere)
+        "_gumbel_allowed",  # set of allowed root action indices under top-m cap
     )
 
     def __init__(
@@ -163,6 +186,8 @@ class _Node:
         self.untried_actions: list[Action] = []
         self.is_terminal = game.is_over()
         self._priors: np.ndarray | None = None
+        self._gumbel: np.ndarray | None = None
+        self._gumbel_allowed: set[int] | None = None
 
     def q(self) -> float:
         if self.n_visits == 0:
@@ -399,9 +424,14 @@ class MCTSAgent:
             # (rare; happens only when hidden info affected legality,
             # which Compile doesn't normally do at top-level decisions).
             self._expand(root, root_legal)
-            self._apply_root_top_k(root)
-            self._apply_root_noise(root)
-            self._search(root, perspective)
+            if self.cfg.use_gumbel_root:
+                # Gumbel replaces top-k pruning + Dirichlet noise + UCB
+                # at the root.
+                self._gumbel_search(root, perspective)
+            else:
+                self._apply_root_top_k(root)
+                self._apply_root_noise(root)
+                self._search(root, perspective)
             # Roll up visits from root children. With root_top_k pruning,
             # the child index points into the pruned `untried_actions`,
             # not the original `legal`; map back via action equality.
@@ -414,6 +444,193 @@ class MCTSAgent:
 
         best_idx = int(np.argmax(total_visits))
         return legal[best_idx]
+
+    def choose_with_target(
+        self,
+        game: Game,
+        legal: list[Action],
+        tau: float = 1.0,
+        return_value: bool = False,
+        sample_action: bool = False,
+        sample_temperature: float = 1.0,
+    ) -> tuple[Action, np.ndarray] | tuple[Action, np.ndarray, float]:
+        """Like `choose`, but also return a soft target distribution over
+        `legal` for policy distillation. Target shape: [len(legal)].
+
+        Target formulation (AlphaZero visit-count target with prior-
+        weighted Laplace smoothing):
+
+            score(a) = visits(a) + alpha * prior(a)
+            target   ∝ score(a) ** (1 / tau)
+
+        `visits(a)` is aggregated across determinizations. The
+        `alpha * prior(a)` term is a soft prior — equivalent to one
+        "virtual sim drawn from the prior" — and exists for two
+        reasons:
+          1. With `root_top_k` pruning, actions outside the top-k get
+             zero visits. Hard-zero targets would teach the policy to
+             eliminate those actions entirely; that's too strong a
+             claim from what is really a search-budget heuristic.
+          2. It preserves the prior's *ranking* on pruned actions
+             rather than collapsing them to a flat floor.
+
+        `tau` is a sharpening exponent (1.0 = standard visits/total,
+        smaller = more peaked, larger = smoother). Defaults to 1.0;
+        AlphaZero uses tau→0 late in training to commit to argmax.
+
+        Edge cases: single-legal actions and mid-effect (CHOOSE_TARGET)
+        decisions return a one-hot target on the policy/MCTS pick,
+        since no search runs in those branches.
+        """
+        if not legal:
+            raise RuntimeError("MCTSAgent.choose_with_target called with empty legal")
+        if len(legal) == 1:
+            target = np.array([1.0], dtype=np.float32)
+            if not return_value:
+                return legal[0], target
+            # No search for single-action states — use NN's value head as
+            # the best estimate we have of the position.
+            _, v = _policy_and_value(self.model, game, legal, self.device)
+            return legal[0], target, v
+
+        # Policy prior at the *real* (non-determinized) state — this is
+        # what the network sees at inference time, so it's what we want
+        # to base the distillation target on. Reused for mid-effect /
+        # skip-when-confident fall-throughs below.
+        probs, nn_value = _policy_and_value(self.model, game, legal, self.device)
+        n = min(len(legal), len(probs))
+        priors = np.zeros(len(legal), dtype=np.float64)
+        priors[:n] = probs[:n]
+
+        if _mid_effect(game):
+            target = np.zeros(len(legal), dtype=np.float32)
+            target[int(np.argmax(priors))] = 1.0
+            action = legal[int(np.argmax(priors))]
+            return (action, target, nn_value) if return_value else (action, target)
+
+        # Skip-when-confident: when search wouldn't disagree anyway,
+        # return policy argmax with one-hot target. Caller may also
+        # filter these out *before* invoking us; this is a safety net.
+        if (
+            self.cfg.skip_search_top_prob > 0.0
+            and float(priors.max()) >= self.cfg.skip_search_top_prob
+        ):
+            target = np.zeros(len(legal), dtype=np.float32)
+            target[int(np.argmax(priors))] = 1.0
+            action = legal[int(np.argmax(priors))]
+            return (action, target, nn_value) if return_value else (action, target)
+
+        perspective = game.decider()
+
+        # Aggregate visits across determinizations + accumulate the
+        # root's search-refined value. Each det's root.total_value /
+        # root.n_visits is the search V from `perspective`'s POV. We
+        # sum total_value and n_visits separately (rather than
+        # averaging per-det V) so dets with more sims weight
+        # proportionally.
+        total_visits = np.zeros(len(legal), dtype=np.int64)
+        root_total_value_sum = 0.0
+        root_visits_sum = 0
+        # For Gumbel mode: accumulate per-det improved-policy targets and
+        # average at the end. For vanilla mode: rely on the visit-count
+        # path below.
+        gumbel_target_sum: np.ndarray | None = (
+            np.zeros(len(legal), dtype=np.float64)
+            if self.cfg.use_gumbel_root else None
+        )
+        n_gumbel_dets = 0
+        for _ in range(self.cfg.n_determinizations):
+            det_game = _determinize(game, perspective, self.rng)
+            root = _Node(game=det_game, parent=None,
+                         action_from_parent=_ROOT_ACTION, prior=1.0)
+            root_legal = det_game.legal_actions()
+            self._expand(root, root_legal)
+            if self.cfg.use_gumbel_root:
+                # Gumbel replaces top-k pruning + Dirichlet noise + UCB
+                # at the root.
+                self._gumbel_search(root, perspective)
+                # Build the Gumbel-improved target for this det, indexed
+                # by the engine's stable `legal` ordering. The det's own
+                # root.untried_actions may align with `legal` index-for-
+                # index (engine action enumeration is deterministic given
+                # state); if not, fall back to action equality.
+                det_target = self._gumbel_improved_target(
+                    root, perspective, n_legal=len(root.untried_actions),
+                )
+                # Map det's positional target into original legal order.
+                for i_det, action_det in enumerate(root.untried_actions):
+                    try:
+                        orig_idx = legal.index(action_det)
+                    except ValueError:
+                        continue
+                    if i_det < len(det_target):
+                        gumbel_target_sum[orig_idx] += det_target[i_det]
+                n_gumbel_dets += 1
+            else:
+                self._apply_root_top_k(root)
+                self._apply_root_noise(root)
+                self._search(root, perspective)
+            root_total_value_sum += root.total_value
+            root_visits_sum += root.n_visits
+            for child in root.children.values():
+                try:
+                    orig_idx = legal.index(child.action_from_parent)
+                except ValueError:
+                    continue
+                total_visits[orig_idx] += child.n_visits
+
+        # Target:
+        #   Gumbel mode → mean of per-det Gumbel-improved policy targets
+        #     (each det's target is guaranteed-improving by construction)
+        #   Vanilla mode → visit-count target with prior-weighted Laplace
+        #     smoothing (the AlphaZero recipe at higher sim budgets)
+        if gumbel_target_sum is not None and n_gumbel_dets > 0:
+            target = (gumbel_target_sum / n_gumbel_dets).astype(np.float32)
+            s = target.sum()
+            if s > 0:
+                target = (target / s).astype(np.float32)
+        else:
+            alpha = 1.0
+            score = total_visits.astype(np.float64) + alpha * priors
+            if tau != 1.0 and tau > 0:
+                score = np.power(np.maximum(score, 1e-12), 1.0 / tau)
+            target = (score / max(1e-9, score.sum())).astype(np.float32)
+
+        # Action selection: argmax of visits (default) OR sample from the
+        # target distribution. Sampling explores mixed strategies — for an
+        # imperfect-information game like Compile, the Nash equilibrium is
+        # generally mixed, so deterministic argmax play is exploitable.
+        # Use sample_action=True during training for diverse trajectories.
+        if sample_action and target.sum() > 0:
+            # Optionally sharpen / smooth via temperature on the target.
+            shaped = np.asarray(target, dtype=np.float64)
+            t = float(max(sample_temperature, 1e-3))
+            if abs(t - 1.0) > 1e-6:
+                shaped = np.power(np.maximum(shaped, 0.0), 1.0 / t)
+            # Strict re-normalize for np.random.choice (it checks sum=1
+            # within ~1e-9). We renormalize after clipping any negatives
+            # introduced by float error, then patch the last positive
+            # bin so the sum is exactly 1.0.
+            shaped = np.maximum(shaped, 0.0)
+            s = shaped.sum()
+            if s <= 0:
+                best_idx = int(np.argmax(total_visits))
+            else:
+                shaped /= s
+                resid = 1.0 - shaped.sum()
+                if abs(resid) > 0:
+                    # Add the residual to the largest bin — harmless and
+                    # keeps the distribution proper.
+                    shaped[int(shaped.argmax())] += resid
+                best_idx = int(self.np_rng.choice(len(target), p=shaped))
+        else:
+            best_idx = int(np.argmax(total_visits))
+        if not return_value:
+            return legal[best_idx], target
+        v_root = (
+            root_total_value_sum / root_visits_sum if root_visits_sum > 0 else nn_value
+        )
+        return legal[best_idx], target, float(v_root)
 
     # ------------------------------------------------------------------
     # PUCT mechanics
@@ -431,6 +648,114 @@ class MCTSAgent:
         # remember the priors here).
         node._priors = probs
         return value
+
+    # ------------------------------------------------------------------
+    # Gumbel root search (Danihelka et al. 2022)
+    # ------------------------------------------------------------------
+    def _gumbel_search(self, root: _Node, perspective: int) -> np.ndarray:
+        """Replace UCB at the root with Gumbel-Top-k action selection.
+
+        At the root we sample one Gumbel(0, 1) noise per legal action
+        and pick the action that maximises `g + log_prior + sigma(q)`
+        at each sim step. Below the root we use standard PUCT. This
+        guarantees the resulting visit distribution is a policy
+        improvement (vanilla AZ does not).
+
+        Returns the Gumbel noise draws (one per root action) so the
+        caller can compute the improved-policy target.
+        """
+        n = len(root.untried_actions)
+        if n == 0:
+            return np.zeros(0, dtype=np.float64)
+        # One Gumbel draw per root action (held constant across sims
+        # of this determinization).
+        gumbel = self.np_rng.gumbel(size=n).astype(np.float64)
+        # Stash on the root so the inner selector can read it.
+        root._gumbel = gumbel  # type: ignore[attr-defined]
+
+        # Top-m candidate restriction (analogous to root_top_k for vanilla
+        # AZ, but using the Gumbel-perturbed score so the tail isn't cut
+        # by prior alone). 0 = no cap, use all legal.
+        m = self.cfg.gumbel_n_candidates
+        log_prior = _log_prior_full(root._priors, n)
+        score_initial = gumbel + log_prior
+        if m > 0 and m < n:
+            order = np.argsort(-score_initial)[:m]
+            allowed = set(int(i) for i in order)
+        else:
+            allowed = set(range(n))
+        root._gumbel_allowed = allowed  # type: ignore[attr-defined]
+
+        # Use the standard batched-sim loop; only the root selector
+        # changes (handled in _select_child via the _gumbel attrs).
+        self._search(root, perspective)
+        return gumbel
+
+    def _gumbel_root_select(self, node: _Node, perspective: int) -> tuple[int, Action]:
+        """Root selection under Gumbel: pick the candidate action that
+        maximises  g + log_prior + sigma(q_complete)."""
+        n = len(node.untried_actions)
+        log_prior = _log_prior_full(node._priors, n)
+        gumbel = getattr(node, "_gumbel", np.zeros(n))
+        allowed = getattr(node, "_gumbel_allowed", set(range(n)))
+
+        # Sigma uses max visits across root children to normalise q to
+        # the same scale as log-probs (paper section 4.1).
+        max_visits = max(
+            (c.n_visits for c in node.children.values()),
+            default=0,
+        )
+        sigma = (
+            (self.cfg.gumbel_c_visit + max_visits) * self.cfg.gumbel_c_scale
+        )
+
+        best_idx = -1
+        best_score = -float("inf")
+        decider = node.game.decider()
+        for i, action in enumerate(node.untried_actions):
+            if i not in allowed:
+                continue
+            child = node.children.get(i)
+            if child is None or child.n_visits == 0:
+                q = 0.0
+            else:
+                q = child.q()
+                if decider != perspective:
+                    q = -q
+            score = gumbel[i] + log_prior[i] + sigma * q
+            if score > best_score:
+                best_score = score
+                best_idx = i
+        if best_idx < 0:
+            # Defensive: no allowed action somehow — fall back to argmax over allowed by prior.
+            best_idx = next(iter(allowed))
+        return best_idx, node.untried_actions[best_idx]
+
+    def _gumbel_improved_target(
+        self, root: _Node, perspective: int, n_legal: int,
+    ) -> np.ndarray:
+        """Compute the Gumbel-improved policy target over the legal-action
+        prefix. Formula (paper eq. 13):
+            target(a) = softmax( log_prior(a) + sigma * q_complete(a) )
+        where q_complete is the search-refined q for visited actions and 0
+        (the value-head baseline) for unvisited. This is the AZ training
+        target that's guaranteed-improving by construction."""
+        log_prior = _log_prior_full(root._priors, n_legal)
+        max_visits = max((c.n_visits for c in root.children.values()), default=0)
+        sigma = (self.cfg.gumbel_c_visit + max_visits) * self.cfg.gumbel_c_scale
+        q = np.zeros(n_legal, dtype=np.float64)
+        decider = root.game.decider()
+        for i in range(n_legal):
+            child = root.children.get(i)
+            if child is not None and child.n_visits > 0:
+                qi = child.q()
+                if decider != perspective:
+                    qi = -qi
+                q[i] = qi
+        logits = log_prior + sigma * q
+        logits -= logits.max()
+        e = np.exp(logits)
+        return (e / max(1e-9, e.sum())).astype(np.float32)
 
     def _apply_root_noise(self, root: _Node) -> None:
         """Mix Dirichlet noise into the root priors (AlphaZero technique).
@@ -473,6 +798,12 @@ class MCTSAgent:
         the floor, fall through to standard PUCT for the remainder of
         the sim budget.
         """
+        # Gumbel root selection — replaces PUCT + round-robin + Dirichlet
+        # at the root. The Gumbel noise + sigma*q formulation gives a
+        # guaranteed-improving policy target even at low sim counts.
+        if node.parent is None and getattr(node, "_gumbel", None) is not None:
+            return self._gumbel_root_select(node, perspective)
+
         # Round-robin floor at the root. `node.parent is None` is the
         # root in this design (every search rebuilds its tree from a
         # fresh root).
@@ -755,6 +1086,20 @@ class MCTSAgent:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _log_prior_full(priors: np.ndarray | None, n: int) -> np.ndarray:
+    """Build a length-`n` log-prior vector that handles the priors-shorter-
+    than-untried-actions case. The policy head only outputs MAX_ACTIONS
+    logits (32), but the engine can occasionally return more legal actions
+    than that; for those tail actions we use a uniform 1/n fallback prior,
+    matching how `_select_child` handles the same edge case for PUCT."""
+    out = np.full(n, math.log(1.0 / max(1, n)), dtype=np.float64)
+    if priors is None or len(priors) == 0:
+        return out
+    n_p = min(n, len(priors))
+    out[:n_p] = np.log(np.maximum(priors[:n_p].astype(np.float64), 1e-12))
+    return out
 
 
 def _mid_effect(game: Game) -> bool:

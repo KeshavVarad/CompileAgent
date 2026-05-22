@@ -498,6 +498,10 @@ export function GameClient({ gameId, initialView, initialTotalActions }: Props) 
         }}
       />
 
+      {!view.draft && view.history.length > 0 && (
+        <HistoryPanel history={view.history} />
+      )}
+
       {!view.draft && (
         <div className="mt-3 flex justify-between items-center">
           <DeleteGameButton
@@ -511,6 +515,56 @@ export function GameClient({ gameId, initialView, initialTotalActions }: Props) 
 
       {view.isOver && <GameOverBanner view={view} />}
     </div>
+  );
+}
+
+function HistoryPanel({
+  history,
+}: {
+  history: GameView["history"];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  // Newest last is a chronological log; the most recent stuff is most
+  // useful for "what just happened," so show the tail by default and
+  // let the user expand to see the full game.
+  const TAIL = 25;
+  const visible = expanded ? history : history.slice(-TAIL);
+  const hidden = history.length - visible.length;
+  return (
+    <Card className="mt-3 border-muted/40">
+      <CardContent className="py-3">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="text-[10px] font-mono uppercase tracking-wide text-muted-foreground">
+            history · {history.length} {history.length === 1 ? "entry" : "entries"}
+          </span>
+          {history.length > TAIL && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-[11px]"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? "collapse" : `show all (${hidden} more)`}
+            </Button>
+          )}
+        </div>
+        <ol className="space-y-0.5 text-xs font-mono leading-relaxed max-h-64 overflow-y-auto">
+          {visible.map((e, i) => (
+            <li
+              key={i}
+              className={
+                e.kind === "info"
+                  ? "text-muted-foreground italic"
+                  : "text-foreground"
+              }
+            >
+              <span className="text-muted-foreground mr-2">t{e.turn}</span>
+              {e.kind === "info" ? `· ${e.text}` : e.text}
+            </li>
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
   );
 }
 

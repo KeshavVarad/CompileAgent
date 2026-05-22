@@ -109,6 +109,23 @@ class Game:
             self.defs, enabled_sets=tuple(enabled),
         )
         rng.shuffle(self._draft_pool)
+        # Optional: truncate to a random subset of the requested size.
+        # The shuffle above already randomised order, so taking the
+        # prefix is a uniform-without-replacement sample. We need at
+        # least len(draft_schedule) protocols available for the snake
+        # draft to complete.
+        if self.config.draft_pool_size is not None:
+            target = self.config.draft_pool_size
+            if target < 6:
+                raise ValueError(
+                    f"draft_pool_size={target} too small; need ≥6 for the snake draft"
+                )
+            if target > len(self._draft_pool):
+                raise ValueError(
+                    f"draft_pool_size={target} > available protocols "
+                    f"({len(self._draft_pool)}) given the enabled sets"
+                )
+            self._draft_pool = self._draft_pool[:target]
         # Snake-style draft per rules: P0 picks 1, P1 picks 2, P0 picks 2, P1 picks 1.
         self._draft_schedule: list[int] = [0, 1, 1, 0, 0, 1]
         self._draft_idx: int = 0

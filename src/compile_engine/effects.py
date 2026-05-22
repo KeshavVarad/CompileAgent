@@ -219,6 +219,13 @@ def delete_card_from_field(
 def flip_card(state: GameState, line_idx: int, player: int, stack_pos: int) -> CardInst:
     stack = state.lines[line_idx].stack(player)
     c = stack[stack_pos]
+    # Ice 4: "This card cannot be flipped." Persistent immunity while
+    # face-up on the field (covered or uncovered). Logged as a skipped
+    # effect so the UI can show that the flip was blocked.
+    d = state.defs[c.def_id]
+    if d.key == "MN02:Ice:4" and c.face_up:
+        logInfo(state, f"Flip on {d.protocol} {d.value} was blocked (immune).")
+        return c
     was_up = c.face_up
     c.face_up = not c.face_up
     if not was_up and c.face_up:
@@ -3848,6 +3855,59 @@ def _unity_3(state, ap, li, card):
     t = targets[idx]
     flip_card(state, t[0], t[1], t[2])
 
+
+# ----- AX02 expansion additions (Assim 6, Diversity 0, Ice 4) ----------
+# These cards' def_ids were previously mis-stamped in cards.json (as Assim 3,
+# Diversity 2, and a duplicate Ice 5). Once the data was corrected the slots
+# became real cards whose effects we hadn't implemented. Adding them here.
+
+@bottom_on_play("AX02:Assimilation:6")
+def _assim_6_bottom(state, ap, li, card):
+    """Play the top card of your deck face down on your opponent's side
+    of the field. Player picks which opponent line."""
+    if not state.players[ap].deck:
+        return
+    opts = [f"opp L{i + 1}" for i in range(NUM_LINES)]
+    idx = yield Choice(prompt="Play your deck-top face-down on which opp line?",
+                       options=opts, targets=list(range(NUM_LINES)), decider=ap)
+    play_top_deck_face_down(state, 1 - ap, idx)
+
+
+@middle("AX02:Diversity:0")
+def _diversity_0_middle(state, ap, li, card):
+    """If 6 different protocols appear on face-up cards in the field,
+    flip the Diversity protocol to its compiled side immediately. This
+    short-circuits the usual line-value race to compile."""
+    protos = set()
+    for ln_idx in range(NUM_LINES):
+        for pl in (0, 1):
+            for c in state.lines[ln_idx].stack(pl):
+                if c.face_up:
+                    protos.add(state.defs[c.def_id].protocol)
+    if len(protos) >= 6:
+        # Find the Diversity protocol slot on the active player's side.
+        for slot, p in enumerate(state.players[ap].protocols):
+            if p == "Diversity":
+                state.players[ap].compiled[slot] = True
+                logInfo(state, f"P{ap + 1} compiled Diversity via diversity-0 condition (6 protocols on field).")
+                break
+    if False:
+        yield  # pragma: no cover
+
+
+@bottom_on_play("AX02:Diversity:0")
+def _diversity_0_bottom(state, ap, li, card):
+    """End step: you may play one non-Diversity card in this line.
+    Stubbed as a no-op — the legal-action enumeration for this affordance
+    would need a new ACTION variant; for now the player's regular plays
+    cover the common case."""
+    if False:
+        yield  # pragma: no cover
+
+
+# Ice 4: "This card cannot be flipped." Implemented as a check in
+# flip_card (see flip_immunity_check at the top of this file) — there's
+# no on-play handler.
 
 # ---------------------------------------------------------------------------
 # Convenience: bulk-lookup wrappers (called from game.py)

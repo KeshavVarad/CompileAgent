@@ -115,6 +115,15 @@ class GameConfig:
     include_expansion: bool = False    # AX01 — legacy field kept for back-compat
     include_main2: bool = False        # MN02 (Chaos / Clarity / ... / War)
     include_aux2: bool = False         # AX02 (Assimilation / Diversity / Unity)
+    # If set, the draft pool is a random subset of this size sampled from
+    # the union of enabled sets. None = use the full enabled pool
+    # (original behaviour). Setting this to e.g. 9 mimics the
+    # competitive-format draft where the per-game pool is constrained,
+    # forcing players to engage with protocols they'd otherwise never
+    # pick. Used by training to diversify the state distribution.
+    # Clamped to len(full_pool) — if smaller than 6 (the snake-draft
+    # picks count) the engine raises.
+    draft_pool_size: int | None = None
     seed: int | None = None
     # Hard turn cap to keep RL rollouts bounded.
     max_turns: int = 200

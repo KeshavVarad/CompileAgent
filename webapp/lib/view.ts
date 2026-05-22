@@ -71,6 +71,18 @@ export type GameView = {
   draft: { pool: string[]; idx: number; schedule: PlayerIndex[] } | null;
   legalActions: ActionView[];
   pendingChoice: ChoiceView | null;
+  /** Chronological log entries — one per applied action and per engine
+   *  side-channel message (skipped effects, redirects, etc.). The
+   *  client renders these as a history panel so the player can
+   *  re-trace what happened, since effects resolve too fast to follow
+   *  in real time. Pre-labeled here against pre-step state so face-up
+   *  identities resolve correctly. */
+  history: Array<{
+    turn: number;
+    kind: "action" | "info";
+    text: string;
+    actor: PlayerIndex | null;
+  }>;
 };
 
 function viewCard(c: CardInst): CardView {
@@ -193,5 +205,11 @@ export function viewOfGame(game: Game): GameView {
       optional: choice.optional,
       decider: choice.decider,
     } : null,
+    history: st.log.map((e) => {
+      if (e.kind === "action") {
+        return { turn: e.turn, kind: "action" as const, text: e.label, actor: e.decider };
+      }
+      return { turn: e.turn, kind: "info" as const, text: e.text, actor: null };
+    }),
   };
 }
