@@ -1346,6 +1346,56 @@ def test_uncover_trigger_fires_when_top_card_deleted():
     )
 
 
+def test_card_effect_refresh_consumes_control_component():
+    """Codex p.10 Spirit 0 clarification: 'When you refresh as
+    instructed, it is a normal refresh action, including spending the
+    control component, if applicable.' Closes the PR #26 known gap
+    where card-effect-triggered refreshes silently skipped the
+    control-rearrange prompt and didn't reset the control_holder.
+
+    Verifies via Spirit 0's middle (Refresh + Draw 1)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=70))
+    g.set_predetermined_draft([["Spirit", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    spirit_0 = next(d for d in defs if d.key == "MN01:Spirit:0")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    spirit_inst = CardInst(inst_id=70001, def_id=spirit_0.def_id, owner=0, face_up=False)
+    g.state.players[0].hand = [spirit_inst]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=70100 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(10)
+    ]
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.control_holder = 0  # ap holds control
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Play Spirit 0 face-up at line 0 (Spirit protocol). Its middle is
+    # "Refresh. Draw 1 card." The refresh should yield the control
+    # rearrange prompt BEFORE the draws happen.
+    g.step(Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0))
+    choice = g._pending[-1].last_choice if g._pending else None
+    assert choice is not None, "expected control rearrange prompt from Spirit 0 middle"
+    assert "Control component" in choice.prompt, (
+        f"expected control rearrange prompt; got: {choice.prompt}"
+    )
+    # Pick "skip"; control should reset to None, then refresh draws happen.
+    skip_idx = next(i for i, t in enumerate(choice.targets) if t == -1)
+    g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=skip_idx))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    assert g.state.control_holder is None, (
+        f"control_holder should reset; got {g.state.control_holder}"
+    )
+
+
 def test_compile_with_control_offers_rearrange_then_resets():
     """Codex p.5-6: 'When the player with the control component compiles
     or refreshes, first the control component is returned to its neutral

@@ -362,8 +362,7 @@ register(MIDDLE_EFFECTS, "AX01:Love:1", function* (state, ap) {
 register(MIDDLE_EFFECTS, "AX01:Love:2", function* (state, ap) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   drawCards(state, opp, 1);
-  refreshPlayer(state, ap);
-  if (false) yield {} as Choice;
+  yield* refreshPlayer(state, ap);
 });
 
 register(MIDDLE_EFFECTS, "AX01:Love:6", function* (state, ap) {
@@ -1191,9 +1190,10 @@ register(MIDDLE_EFFECTS, "MN01:Speed:4", function* (state, ap) {
 // ---------------------------------------------------------------------------
 
 register(MIDDLE_EFFECTS, "MN01:Spirit:0", function* (state, ap) {
-  refreshPlayer(state, ap);
+  // Refresh. Draw 1 card. (Two sentences per Codex p.2 — refresh may
+  // yield the control-rearrange prompt before the draw.)
+  yield* refreshPlayer(state, ap);
   drawCards(state, ap, 1);
-  if (false) yield {} as Choice;
 });
 
 register(MIDDLE_EFFECTS, "MN01:Spirit:1", function* (state, ap) {
@@ -2468,7 +2468,7 @@ register(AFTER_OPP_REFRESH_EFFECTS, "MN02:War:1", function* (state, ap, li, card
   const stack = lineStack(state.lines[li], ap);
   if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   yield* discardOptionalLoop(state, ap, state.players[ap].hand.length);
-  refreshPlayer(state, ap);
+  yield* refreshPlayer(state, ap);
 });
 
 register(MIDDLE_EFFECTS, "MN02:War:2", function* (state, ap, li, card) {
@@ -2528,7 +2528,7 @@ register(MIDDLE_EFFECTS, "MN02:War:4", function* (state, ap) {
 
 register(MIDDLE_EFFECTS, "AX02:Assimilation:1", function* (state, ap) {
   yield* discardN(state, ap, 1);
-  refreshPlayer(state, ap);
+  yield* refreshPlayer(state, ap);
 });
 
 // Assimilation 1 bottom — "After a player refreshes: Draw the top card

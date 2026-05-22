@@ -5,7 +5,7 @@
 
 import { CARD_DEFS, safeCardDef } from "./cards";
 import { rngShuffle } from "./rng";
-import type { Action, CardInst, GameState, LineState, PlayerIndex } from "./types";
+import type { Action, CardInst, Choice, GameState, LineState, PlayerIndex } from "./types";
 import { FACE_DOWN_BASE_VALUE, NUM_LINES } from "./types";
 
 export function lineStack(line: LineState, player: PlayerIndex): CardInst[] {
@@ -342,7 +342,19 @@ export function playTopDeckFaceDown(
   return c;
 }
 
-export function refreshPlayer(state: GameState, player: PlayerIndex): void {
+/** Generator. A "refresh" — replenishes hand to 5 and flags the
+ *  after-refresh event. Codex p.10 (Spirit 0 clarification): when you
+ *  refresh as instructed it is a "normal refresh action, including
+ *  spending the control component, if applicable" — so we yield the
+ *  control-rearrange prompt before drawing when `player` holds the
+ *  control component. All callers must `yield* refreshPlayer(...)`. */
+export function* refreshPlayer(state: GameState, player: PlayerIndex): Generator<Choice, void, number> {
+  if (state.controlHolder === player) {
+    // `controlRearrangeGen` lives in effects.ts; require() it lazily to
+    // avoid a circular import (effects.ts already pulls from helpers.ts).
+    const { controlRearrangeGen } = require("./effects");
+    yield* controlRearrangeGen(state, player);
+  }
   const ps = state.players[player];
   const need = 5 - ps.hand.length;
   if (need > 0) drawCards(state, player, need);

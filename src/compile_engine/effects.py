@@ -392,7 +392,18 @@ def play_top_deck_face_down_under(
     return c
 
 
-def refresh_player(state: GameState, player: int) -> None:
+def refresh_player(state: GameState, player: int):
+    """Generator. A "refresh" — replenishes hand to 5 and flags the
+    after-refresh event. Codex p.10 (Spirit 0 clarification): "When you
+    refresh as instructed, it is a normal refresh action, including
+    spending the control component, if applicable." So when `player`
+    holds the control component, we yield the control-rearrange prompt
+    BEFORE drawing.
+
+    All callers must `yield from refresh_player(...)`.
+    """
+    if state.control_holder == player:
+        yield from _control_rearrange_gen(state, player)
     ps = state.players[player]
     need = 5 - len(ps.hand)
     if need > 0:
@@ -1370,9 +1381,7 @@ def _love_1_end(state, ap, li, card):
 def _love_2(state, ap, li, card):
     # Your opponent draws 1 card. Refresh.
     draw_cards(state, 1 - ap, 1)
-    refresh_player(state, ap)
-    if False:
-        yield  # pragma: no cover
+    yield from refresh_player(state, ap)
 
 
 @middle("AX01:Love:3")
@@ -2418,10 +2427,10 @@ def _speed_4(state, ap, li, card):
 
 @middle("MN01:Spirit:0")
 def _spirit_0(state, ap, li, card):
-    refresh_player(state, ap)
+    # Refresh. Draw 1 card. (Two sentences per Codex p.2 — refresh
+    # may yield the control-rearrange prompt before the draw.)
+    yield from refresh_player(state, ap)
     draw_cards(state, ap, 1)
-    if False:
-        yield  # pragma: no cover
 
 
 # Spirit 0 bottom — persistent (player_skips_check_cache).
@@ -4011,7 +4020,7 @@ def _war_1_after_opp_refresh(state, ap, li, card):
     if not stack or stack[-1] is not card:
         return
     yield from _discard_optional_loop(state, ap, max_n=len(state.players[ap].hand))
-    refresh_player(state, ap)
+    yield from refresh_player(state, ap)
 
 
 @middle("MN02:War:2")
@@ -4087,7 +4096,7 @@ def _war_4(state, ap, li, card):
 def _assim_1(state, ap, li, card):
     # M: Discard 1 card. Refresh.
     yield from _discard_n(state, ap, 1)
-    refresh_player(state, ap)
+    yield from refresh_player(state, ap)
 
 
 # Assimilation 1 bottom — "After a player refreshes: Draw the top card
