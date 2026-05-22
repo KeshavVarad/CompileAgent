@@ -1211,6 +1211,127 @@ def test_uncover_trigger_fires_when_top_card_deleted():
     )
 
 
+def test_gravity_1_allows_shifting_opp_cards():
+    """Codex p.3 default targeting: 'your cards or your opponent's cards
+    can both be selected' unless restricted. Gravity 1 says 'Shift 1
+    card to or from this line' with no 'your' qualifier — opp's cards
+    must be valid targets too. Pre-fix the handler restricted to self."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=40))
+    g.set_predetermined_draft([["Gravity", "Death", "Water"], ["Fire", "Light", "Speed"]])
+    defs = load_card_defs()
+    gravity_1 = next(d for d in defs if d.key == "MN01:Gravity:1")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    grav1_inst = CardInst(inst_id=40001, def_id=gravity_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [grav1_inst]  # Gravity at line 0
+    # P1 has an uncovered face-up card in line 1
+    g.state.lines[1].p1_stack = [
+        CardInst(inst_id=40100, def_id=fire_0.def_id, owner=1, face_up=True),
+    ]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=40200 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Directly invoke Gravity 1's middle. Yield should include an opp-side option.
+    from compile_engine.effects import MIDDLE_EFFECTS
+    gen = MIDDLE_EFFECTS["MN01:Gravity:1"](g.state, 0, 0, grav1_inst)
+    choice = next(gen)
+    opp_options = [o for o in choice.options if "(opp)" in o]
+    assert len(opp_options) > 0, f"Gravity 1 should allow shifting opp's cards; options: {choice.options}"
+
+
+def test_mirror_3_allows_self_flip_with_no_second_flip():
+    """Codex p.13: 'If Mirror 3 flips itself first, the second flip
+    doesn't happen.' Mirror 3 IS a valid first-flip target; after self-
+    flipping face-down, the second clause is skipped."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=41, include_main2=True))
+    g.set_predetermined_draft([["Mirror", "Death", "Water"], ["Fire", "Light", "Speed"]])
+    defs = load_card_defs()
+    mirror_3 = next(d for d in defs if d.key == "MN02:Mirror:3")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    m3_inst = CardInst(inst_id=41001, def_id=mirror_3.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [m3_inst]
+    g.state.lines[0].p1_stack = [
+        CardInst(inst_id=41100, def_id=fire_0.def_id, owner=1, face_up=True),
+    ]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Mirror 3 should be selectable as a "your card" target.
+    from compile_engine.effects import MIDDLE_EFFECTS
+    gen = MIDDLE_EFFECTS["MN02:Mirror:3"](g.state, 0, 0, m3_inst)
+    choice = next(gen)
+    self_targets = [i for i, t in enumerate(choice.targets) if t[3] is m3_inst]
+    assert len(self_targets) == 1, f"Mirror 3 should be selectable as its own first-flip target; options: {choice.options}"
+    # Pick Mirror 3 → flip face-down → second clause should be skipped (no opp prompt).
+    try:
+        nxt = gen.send(self_targets[0])
+        raise AssertionError(
+            f"Expected generator to stop after self-flip; got another Choice: {nxt.prompt}"
+        )
+    except StopIteration:
+        pass  # Correct: no second flip
+
+
+def test_plague_3_only_flips_uncovered():
+    """Codex p.9: Plague 3's middle 'Flip each other face-up card' only
+    affects UNCOVERED face-up cards (per default targeting rule). The
+    pre-fix handler flipped covered face-up cards too."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=42))
+    g.set_predetermined_draft([["Plague", "Light", "Fire"], ["Death", "Water", "Speed"]])
+    defs = load_card_defs()
+    plague_3 = next(d for d in defs if d.key == "MN01:Plague:3")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0 has covered face-up Fire 0 (covered by face-down card on top) in line 1
+    covered_fu = CardInst(inst_id=42001, def_id=fire_0.def_id, owner=0, face_up=True)
+    fd_top = CardInst(inst_id=42002, def_id=fire_0.def_id, owner=0, face_up=False)
+    g.state.lines[1].p0_stack = [covered_fu, fd_top]
+    # P0 also has uncovered face-up Fire 0 in line 2
+    uncovered_fu = CardInst(inst_id=42003, def_id=fire_0.def_id, owner=0, face_up=True)
+    g.state.lines[2].p0_stack = [uncovered_fu]
+    # P0 plays Plague 3 face-up at line 0 (Plague protocol).
+    plague_3_inst = CardInst(inst_id=42004, def_id=plague_3.def_id, owner=0, face_up=False)
+    g.state.players[0].hand = [plague_3_inst]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=42100 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.step(Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Covered face-up should still be face-up (untouched). Uncovered should be flipped face-down.
+    assert covered_fu.face_up, "Plague 3 should NOT flip covered face-up cards (uncovered only)"
+    assert not uncovered_fu.face_up, "Plague 3 should flip the uncovered face-up card"
+
+
 def test_courage_3_prompts_for_tied_opp_lines():
     """Codex p.9 clarification: when multiple lines tie for opp's highest
     total value, the Courage 3 owner picks. Prior to the fix, the engine

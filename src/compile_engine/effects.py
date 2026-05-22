@@ -1477,20 +1477,22 @@ def _death_0(state, ap, li, card):
 # delete 1 other card. Then, delete this card."
 @start_trigger("MN01:Death:1")
 def _death_1_start(state, ap, li, card):
-    # Offer the optional draw+delete-self chain.
+    # Offer the optional draw chain regardless of whether a delete target
+    # currently exists. Per Codex card-text rule p.2: "If you cannot
+    # complete the text of a card, the card is still played." So if you
+    # draw and there's no other card to delete, the "delete 1 other"
+    # sub-instruction fails (no benefit) but the chain continues to
+    # "Then, delete this card" — which still resolves.
     deck_has = bool(state.players[ap].deck) or bool(state.players[ap].trash)
     if not deck_has:
         return
-    targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
-    if not targets:
-        return
     idx = yield Choice(
         prompt="(optional) Draw 1 + delete 1 other card + delete this card",
-        options=["accept"] + ["skip"], targets=[1, -1], optional=True, decider=ap,
+        options=["accept", "skip"], targets=[0, -1], optional=True, decider=ap,
     )
     if idx == -1 or idx == 1:
         return
-    # Accept = idx==0
+    # Accept (idx == 0).
     draw_cards(state, ap, 1)
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
     if targets:
@@ -1499,7 +1501,8 @@ def _death_1_start(state, ap, li, card):
                           options=opts, targets=targets, decider=ap)
         sln, spl, spos, _ = targets[i2]
         delete_card_from_field(state, sln, spl, spos)
-    # Delete this card from wherever it is.
+    # Delete this card from wherever it is (Codex FAQ p.7: top text can
+    # delete itself even if covered).
     for ln in range(NUM_LINES):
         for pl in (0, 1):
             s = state.lines[ln].stack(pl)
@@ -1680,27 +1683,34 @@ def _gravity_0(state, ap, li, card):
 
 @middle("MN01:Gravity:1")
 def _gravity_1(state, ap, li, card):
+    # Draw 2 cards. Shift 1 card either to or from this line.
+    # Codex p.3 default targeting: "your cards or your opponent's cards
+    # can both be selected" unless the text says otherwise. Gravity 1
+    # does not restrict to "your" cards, so opp's are valid too.
+    # Shifts stay on the card's own side; "this line" refers to the
+    # line column (Gravity 1's line).
     draw_cards(state, ap, 2)
-    # Shift 1 card either to or from this line on this player's side. Uses
-    # the shift-target enumerator so face-up covered Speed 2 / Spirit 3 on
-    # our side are valid.
     options = []
     targets = []
-    candidates = _enumerate_shift_targets(state, owner="self", active_player=ap)
+    candidates = _enumerate_shift_targets(state, owner="any", active_player=ap)
     for ln, pl, pos, c in candidates:
         if ln == li:
+            # Shift FROM this line → any other line on the card's side.
             for dst in range(NUM_LINES):
                 if dst == li:
                     continue
+                side_tag = "yours" if pl == ap else "opp"
                 options.append(
-                    f"FROM {ln} -> {dst}: {_describe_card(state, ln, ap, c, viewer=ap)}"
+                    f"FROM L{ln} → L{dst} ({side_tag}): {_describe_card(state, ln, pl, c, viewer=ap)}"
                 )
-                targets.append((ln, ap, pos, dst))
+                targets.append((ln, pl, pos, dst))
         else:
+            # Shift TO this line on the card's side.
+            side_tag = "yours" if pl == ap else "opp"
             options.append(
-                f"TO {li} <- {ln}: {_describe_card(state, ln, ap, c, viewer=ap)}"
+                f"TO L{li} ← L{ln} ({side_tag}): {_describe_card(state, ln, pl, c, viewer=ap)}"
             )
-            targets.append((ln, ap, pos, li))
+            targets.append((ln, pl, pos, li))
     if not targets:
         return
     idx = yield Choice(prompt="Shift 1 card to or from this line",
@@ -1754,9 +1764,17 @@ def _gravity_6(state, ap, li, card):
 # card." (bottom command was removed; previously immediate-on-cover.)
 @middle("MN01:Life:0")
 def _life_0(state, ap, li, card):
-    for ln in range(NUM_LINES):
-        if state.lines[ln].stack(ap):
-            play_top_deck_face_down(state, ap, ln)
+    # Codex p.9: "If Life 0 gets covered during this process, its middle
+    # command stops." Notes the lines first (atomic snapshot), then plays
+    # face-down one line at a time and short-circuits if Life 0 becomes
+    # covered (or leaves play) mid-resolution.
+    lines_to_play = [ln for ln in range(NUM_LINES) if state.lines[ln].stack(ap)]
+    for ln in lines_to_play:
+        # Bail if Life 0 is no longer face-up + uncovered on owner's side.
+        owner_stack = state.lines[li].stack(ap) if li is not None else []
+        if card not in owner_stack or owner_stack[-1] is not card:
+            return
+        play_top_deck_face_down(state, ap, ln)
     if False:
         yield  # pragma: no cover
 
@@ -1886,7 +1904,11 @@ def _light_2(state, ap, li, card):
 
 @middle("MN01:Light:3")
 def _light_3(state, ap, li, card):
-    # Shift all face-down cards in this line to another line.
+    # Shift all face-down cards in this line to another line. Codex p.9:
+    # "The face-down cards shifted by Light 3 maintain the same relative
+    # positioning in their stacks." We iterate bottom→top and re-lookup
+    # each card's current position before shifting so the destination
+    # stack accumulates bottom→top in source order.
     other_lines = [i for i in range(NUM_LINES) if i != li]
     if not other_lines:
         return
@@ -1895,11 +1917,11 @@ def _light_3(state, ap, li, card):
                         targets=other_lines, decider=ap)
     dst = other_lines[didx]
     for pl in (0, 1):
-        s = state.lines[li].stack(pl)
-        # collect indices in reverse
-        positions = [i for i, c in enumerate(s) if not c.face_up]
-        for pos in reversed(positions):
-            shift_card(state, li, pl, pos, dst)
+        fd_cards = [c for c in state.lines[li].stack(pl) if not c.face_up]
+        for c in fd_cards:
+            cur_s = state.lines[li].stack(pl)
+            if c in cur_s:
+                shift_card(state, li, pl, cur_s.index(c), dst)
 
 
 @middle("MN01:Light:4")
@@ -2021,12 +2043,27 @@ def _plague_2(state, ap, li, card):
 
 @middle("MN01:Plague:3")
 def _plague_3(state, ap, li, card):
+    # Errata 9/2025: "Flip each other uncovered face-up card." Codex p.9:
+    # "this only affects uncovered cards" + "owner notes each uncovered
+    # face-up card, then chooses which to process one at a time." We
+    # snapshot the eligible set first, then iterate — flip consequences
+    # may change the field, but per Codex the iteration list is fixed at
+    # the start.
+    eligible = []
     for ln in range(NUM_LINES):
         for pl in (0, 1):
-            for c in state.lines[ln].stack(pl):
-                if c is card or not c.face_up:
-                    continue
-                c.face_up = False
+            s = state.lines[ln].stack(pl)
+            if not s:
+                continue
+            top = s[-1]
+            if top is card or not top.face_up:
+                continue
+            eligible.append((ln, pl, top))
+    for ln, pl, c in eligible:
+        cur_s = state.lines[ln].stack(pl)
+        if c not in cur_s:
+            continue
+        flip_card(state, ln, pl, cur_s.index(c))
     if False:
         yield  # pragma: no cover
 
@@ -2419,10 +2456,16 @@ def _water_0(state, ap, li, card):
 
 @middle("MN01:Water:1")
 def _water_1(state, ap, li, card):
-    # Play top of deck face-down in each OTHER line.
-    for ln in range(NUM_LINES):
-        if ln == li:
-            continue
+    # Play top of deck face-down in each OTHER line. Codex p.10 parallels
+    # the Life 0 clarification — owner notes the lines first, processes
+    # one at a time, consequences before next. We snapshot the OTHER
+    # lines up front; intermediate consequences cannot make Water 1
+    # itself covered (we only play into other lines), but a chained
+    # effect could remove Water 1 from the field, so we bail in that case.
+    other_lines = [ln for ln in range(NUM_LINES) if ln != li]
+    for ln in other_lines:
+        if card not in state.lines[li].stack(ap):
+            return
         play_top_deck_face_down(state, ap, ln)
     if False:
         yield  # pragma: no cover
@@ -2430,13 +2473,15 @@ def _water_1(state, ap, li, card):
 
 @middle("MN01:Water:2")
 def _water_2(state, ap, li, card):
+    # Draw 2 cards. Rearrange your protocols. Codex p.4: "the end state
+    # of that rearrangement must be different from the start state."
+    # The text uses no "may" → mandatory per Codex p.2.
     draw_cards(state, ap, 2)
-    # Rearrange your protocols.
     pairs = [(a, b) for a in range(NUM_LINES) for b in range(a + 1, NUM_LINES)]
-    opts = [f"swap L{a}<->L{b}" for a, b in pairs] + ["no swap"]
-    idx = yield Choice(prompt="Rearrange your protocols",
-                       options=opts, targets=pairs + [None], decider=ap)
-    if idx < len(pairs):
+    opts = [f"swap L{a}<->L{b}" for a, b in pairs]
+    idx = yield Choice(prompt="Rearrange your protocols (must swap a pair)",
+                       options=opts, targets=list(pairs), decider=ap)
+    if 0 <= idx < len(pairs):
         a, b = pairs[idx]
         ps = state.players[ap]
         ps.protocols[a], ps.protocols[b] = ps.protocols[b], ps.protocols[a]
@@ -2536,13 +2581,17 @@ def _chaos_0_start(state, ap, li, card):
 
 @middle("MN02:Chaos:1")
 def _chaos_1(state, ap, li, card):
-    # M: Rearrange your protocols. Rearrange your opponent's protocols.
+    # Rearrange your protocols. Rearrange your opponent's protocols.
+    # Codex p.13: "You must make a change to the protocols of both
+    # players." Combined with Codex p.4 "the end state of that
+    # rearrangement must be different from the start state" — no
+    # "no swap" option is offered.
+    pairs = [(a, b) for a in range(NUM_LINES) for b in range(a + 1, NUM_LINES)]
     for who in (ap, state.opponent(ap)):
-        pairs = [(a, b) for a in range(NUM_LINES) for b in range(a + 1, NUM_LINES)]
-        opts = [f"swap P{who} L{a}<->L{b}" for a, b in pairs] + ["no swap"]
-        targets = list(pairs) + [None]
+        opts = [f"swap P{who} L{a}<->L{b}" for a, b in pairs]
+        targets = list(pairs)
         idx = yield Choice(
-            prompt=f"Rearrange P{who}'s protocols",
+            prompt=f"Rearrange P{who}'s protocols (must change)",
             options=opts, targets=targets, decider=ap,
         )
         if 0 <= idx < len(pairs):
@@ -3297,6 +3346,11 @@ def _luck_3(state, ap, li, card):
     top = ps_opp.deck.pop()
     top.face_up = True
     state.players[top.owner].trash.append(top)
+    # Codex FAQ p.7: "If an effect happens when someone discards cards,
+    # that includes both discarding from hand and discarding from the
+    # top of a deck." Flag opp as the discarder so @after_self_discard /
+    # @after_opp_discard / @after_self_discard_on_opp_turn triggers fire.
+    _flag_after_discard(state, opp)
     if state.defs[top.def_id].protocol != stated:
         return
     targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
@@ -3395,11 +3449,19 @@ def _mirror_1_end(state, ap, li, card):
 @middle("MN02:Mirror:2")
 def _mirror_2(state, ap, li, card):
     # Swap all of your cards in one stack with another of your stacks.
-    pairs = [(a, b) for a in range(NUM_LINES) for b in range(a + 1, NUM_LINES)]
-    opts = [f"swap your stack L{a}<->L{b}" for a, b in pairs] + ["no swap"]
-    targets = list(pairs) + [None]
+    # Codex p.13: "The swapped cards keep the same relative positions.
+    # A stack must have at least 1 card in it to swap." Filter pairs to
+    # those where at least one stack is non-empty (so the swap actually
+    # changes state — Codex p.4 also requires the end state to differ).
+    pairs = [
+        (a, b) for a in range(NUM_LINES) for b in range(a + 1, NUM_LINES)
+        if len(state.lines[a].stack(ap)) > 0 or len(state.lines[b].stack(ap)) > 0
+    ]
+    if not pairs:
+        return
+    opts = [f"swap your stack L{a}<->L{b}" for a, b in pairs]
     idx = yield Choice(prompt="Swap which two of your stacks?",
-                       options=opts, targets=targets, decider=ap)
+                       options=opts, targets=list(pairs), decider=ap)
     if not (0 <= idx < len(pairs)):
         return
     a, b = pairs[idx]
@@ -3415,7 +3477,11 @@ def _mirror_2(state, ap, li, card):
 @middle("MN02:Mirror:3")
 def _mirror_3(state, ap, li, card):
     # Flip 1 of YOUR cards. Flip 1 of OPP's cards IN THE SAME LINE.
-    own = _enumerate_uncovered(state, owner="self", exclude=card, active_player=ap)
+    # Codex p.13: "If Mirror 3 flips itself first, the second flip
+    # doesn't happen." So Mirror 3 IS a valid first-flip target; we just
+    # short-circuit the second clause if Mirror 3 went face-down (its
+    # own middle text is no longer in play to execute the second flip).
+    own = _enumerate_uncovered(state, owner="self", active_player=ap)
     if not own:
         return
     opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in own]
@@ -3424,7 +3490,10 @@ def _mirror_3(state, ap, li, card):
         return
     t = own[idx]
     flip_card(state, t[0], t[1], t[2])
-    opp = state.opponent(ap)
+    # If Mirror 3 self-flipped (and is now face-down), Codex says the
+    # second flip doesn't happen.
+    if not card.face_up:
+        return
     opp_in_line = _enumerate_uncovered(state, owner="opponent", line_filter=t[0], active_player=ap)
     if not opp_in_line:
         return
