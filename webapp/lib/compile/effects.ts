@@ -2353,7 +2353,55 @@ register(MIDDLE_EFFECTS, "AX02:Assimilation:4", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
+// Assimilation 6 bottom: "Play the top card of your deck face down on
+// your opponent's side of the field." Player picks the opponent line.
+// Mirrors src/compile_engine/effects.py.
+register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Assimilation:6", function* (state, ap) {
+  const ps = state.players[ap];
+  if (ps.deck.length === 0) return;
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const idx: number = yield {
+    prompt: "Play your deck-top face-down on which opp line?",
+    options: ["opp L1", "opp L2", "opp L3"],
+    targets: [0, 1, 2],
+    optional: false, decider: ap,
+  };
+  if (idx < 0 || idx > 2) return;
+  playTopDeckFaceDown(state, opp, idx as 0 | 1 | 2);
+});
+
 // ----- AX02: Diversity -----------------------------------------------------
+
+// Diversity 0 middle: "If 6 different protocols on face-up cards in
+// field, flip the Diversity protocol to its compiled side."
+register(MIDDLE_EFFECTS, "AX02:Diversity:0", function* (state, ap) {
+  const protos = new Set<string>();
+  for (let ln = 0; ln < 3; ln++) {
+    for (const pl of [0, 1] as PlayerIndex[]) {
+      for (const c of lineStack(state.lines[ln], pl)) {
+        if (c.faceUp) protos.add(CARD_DEFS[c.defId].protocol);
+      }
+    }
+  }
+  if (protos.size >= 6) {
+    const ps = state.players[ap];
+    const slot = ps.protocols.indexOf("Diversity");
+    if (slot >= 0) {
+      ps.compiled[slot] = true;
+      logInfo(state, `P${ap + 1} compiled Diversity via diversity-0 condition (6 protocols on field).`);
+    }
+  }
+  if (false) yield {} as Choice;
+});
+
+// Diversity 0 bottom: "End step: you may play one non-Diversity card
+// in this line." Stubbed as a no-op — would need a new ACTION variant
+// to model the off-turn play affordance. Regular plays cover the common
+// case.
+register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Diversity:0", function* () {
+  if (false) yield {} as Choice;
+});
+
 // Diversity 6 top: "End: If there are not at least 3 different protocols
 // on cards in the field, delete this card." Codex says this is an End
 // trigger, not continuous. The `checkDiversity6SelfDestruct` continuous

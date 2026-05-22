@@ -58,6 +58,12 @@ export type GameConfig = {
   includeExpansion: boolean;     // AX01
   includeMain2?: boolean;        // MN02
   includeAux2?: boolean;         // AX02
+  /** If set, the draft pool is a random subset of this size sampled from
+   *  the union of enabled sets. Undefined = use the full enabled pool.
+   *  Mirrors `draft_pool_size` in the Python engine; used to inject
+   *  protocol-diversity into RL training. Must be ≥6 (the snake-draft
+   *  pick count). */
+  draftPoolSize?: number;
   maxTurns: number;
   seed: number;
   /** Display labels for the UI/recorder. */
@@ -141,6 +147,11 @@ export type GameLogEntry =
       turn: number;
       decider: PlayerIndex;
       action: Action;
+      /** Pre-computed human-readable label, captured against the state
+       *  BEFORE the action lands (so hand-index lookups resolve to the
+       *  card that was actually played, not what's there now). Stored
+       *  here because the hand changes by render time. */
+      label: string;
       timestamp: number;
     }
   | {

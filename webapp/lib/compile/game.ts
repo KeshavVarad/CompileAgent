@@ -48,6 +48,7 @@ import {
   computeLineValue,
   discardToTrash,
   drawCards,
+  formatActionLabel,
   lineStack,
   middleSuppressed,
   oppMustPlayFacedown,
@@ -95,6 +96,23 @@ export class Game {
     if (config.includeAux2) enabled.add(AUX2_SET);
     const draftPool: Protocol[] = protocolsForSets(enabled);
     rngShuffle(rng, draftPool);
+    // Optional: truncate to a random subset of the requested size.
+    // Shuffle above made the order uniform; taking the prefix is a
+    // uniform-without-replacement sample. Must have at least 6
+    // protocols (the snake-draft pick count). Mirrors the Python
+    // engine's GameConfig.draft_pool_size behaviour.
+    if (config.draftPoolSize !== undefined) {
+      const target = config.draftPoolSize;
+      if (target < 6) {
+        throw new Error(`draftPoolSize=${target} too small; need ≥6 for the snake draft`);
+      }
+      if (target > draftPool.length) {
+        throw new Error(
+          `draftPoolSize=${target} > available protocols (${draftPool.length}) given the enabled sets`
+        );
+      }
+      draftPool.length = target;
+    }
 
     const emptyPlayer = (idx: PlayerIndex): PlayerState => ({
       idx,
@@ -244,7 +262,9 @@ export class Game {
     if (st.phase === "GAME_OVER") throw new Error("Game over");
 
     st.log.push({
-      kind: "action", turn: st.turn, decider: this.decider(), action, timestamp: Date.now(),
+      kind: "action", turn: st.turn, decider: this.decider(), action,
+      label: formatActionLabel(st, action),
+      timestamp: Date.now(),
     });
 
     if (this.pending.length > 0 && this.pending[this.pending.length - 1].lastChoice) {

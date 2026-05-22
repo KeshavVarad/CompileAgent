@@ -174,15 +174,21 @@ def main() -> None:
     ap.add_argument("--main2-prob", type=float, default=DEFAULT_MAIN2_PROB)
     ap.add_argument("--aux2-prob", type=float, default=DEFAULT_AUX2_PROB)
     ap.add_argument("--max-turns", type=int, default=200)
+    ap.add_argument("--stochastic", type=int, default=1,
+                    help="1 (default) = both agents sample from policy "
+                         "distribution — measures mixed-Nash performance. "
+                         "0 = argmax — deterministic, reproducible, but "
+                         "captures only pure-strategy play.")
     args = ap.parse_args()
+    args.stochastic = bool(args.stochastic)
 
     device = resolve_device(args.device)
     defs = load_card_defs()
 
     model = load_model_from_ckpt(args.model, device)
-    agent = NNAgent(model, device=device, stochastic=False)
+    agent = NNAgent(model, device=device, stochastic=args.stochastic)
     opp_spec = OpponentSpec.parse(args.opp)
-    opp = build_agent(opp_spec, device, seed=args.seed + 1)
+    opp = build_agent(opp_spec, device, seed=args.seed + 1, stochastic=args.stochastic)
 
     rng = random.Random(args.seed)
     rows: list[GameSummary] = []

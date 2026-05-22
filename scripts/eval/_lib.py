@@ -64,9 +64,13 @@ def load_model_from_ckpt(ckpt_path: str, device: torch.device) -> PolicyValueNet
     return model
 
 
-def build_agent(spec: OpponentSpec, device: torch.device, *, seed: int = 0):
-    """Instantiate an Agent from a spec. NN agents are deterministic (argmax)
-    so eval numbers are reproducible given the seed."""
+def build_agent(spec: OpponentSpec, device: torch.device, *, seed: int = 0,
+                stochastic: bool = True):
+    """Instantiate an Agent from a spec. `stochastic=True` (default) makes
+    NN agents sample from the policy distribution — appropriate for
+    measuring mixed-Nash performance in an imperfect-information game
+    like Compile. Set False for argmax/deterministic play (useful for
+    reproducibility-critical comparisons)."""
     if spec.kind == "random":
         return RandomAgent(seed=seed)
     if spec.kind == "greedy":
@@ -74,7 +78,7 @@ def build_agent(spec: OpponentSpec, device: torch.device, *, seed: int = 0):
     if spec.kind == "snapshot":
         assert spec.ckpt_path is not None
         m = load_model_from_ckpt(spec.ckpt_path, device)
-        return NNAgent(m, device=device, stochastic=False)
+        return NNAgent(m, device=device, stochastic=stochastic)
     raise ValueError(f"unknown opponent kind: {spec.kind}")
 
 

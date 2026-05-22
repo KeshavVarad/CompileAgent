@@ -3,9 +3,9 @@
  * src/compile_engine/effects.py — same semantics, same trigger queue.
  */
 
-import { CARD_DEFS } from "./cards";
+import { CARD_DEFS, safeCardDef } from "./cards";
 import { rngShuffle } from "./rng";
-import type { CardInst, GameState, LineState, PlayerIndex } from "./types";
+import type { Action, CardInst, GameState, LineState, PlayerIndex } from "./types";
 import { FACE_DOWN_BASE_VALUE, NUM_LINES } from "./types";
 
 export function lineStack(line: LineState, player: PlayerIndex): CardInst[] {
@@ -87,6 +87,47 @@ export function computeLineValue(state: GameState, lineIdx: number, player: Play
  */
 export function logInfo(state: GameState, text: string): void {
   state.log.push({ kind: "info", turn: state.turn, text, timestamp: Date.now() });
+}
+
+/** Pre-render a human-readable label for an action against the game
+ *  state that produced it. Used by step() to stamp action log entries
+ *  with their label BEFORE the action lands, since the hand index used
+ *  by play/discard actions resolves to a different card afterwards. */
+export function formatActionLabel(state: GameState, action: Action): string {
+  const seat = state.currentPlayer;
+  const seatLabel = seat === 0
+    ? (state.config?.player0Label ?? "P1")
+    : (state.config?.player1Label ?? "P2");
+  const hand = state.players[seat]?.hand ?? [];
+  const c = action.handIndex != null ? hand[action.handIndex] : undefined;
+  const def = c ? safeCardDef(c.defId) : null;
+  const cardLabel = def && def.defId !== -1
+    ? `${def.protocol} ${def.value}`
+    : "card";
+  switch (action.type) {
+    case "DRAFT_PROTOCOL":
+      return `${seatLabel} drafted ${action.protocol}`;
+    case "PLAY_FACE_UP":
+      return `${seatLabel} played ${cardLabel} face-up in L${(action.lineIndex ?? 0) + 1}`;
+    case "PLAY_FACE_DOWN":
+      return `${seatLabel} played a card face-down in L${(action.lineIndex ?? 0) + 1}`;
+    case "REFRESH":
+      return `${seatLabel} refreshed`;
+    case "COMPILE_LINE":
+      return `${seatLabel} compiled L${(action.lineIndex ?? 0) + 1}`;
+    case "DISCARD_CARD":
+      return `${seatLabel} discarded ${cardLabel}`;
+    case "SHIFT_OWN_CARD":
+      return `${seatLabel} shifted card → L${(action.choiceIndex ?? 0) + 1}`;
+    case "CHOOSE_TARGET":
+      return `${seatLabel} picked option ${(action.choiceIndex ?? 0) + 1}`;
+    case "SKIP_OPTIONAL":
+      return `${seatLabel} skipped`;
+    case "NOOP":
+      return `${seatLabel} (no action)`;
+    default:
+      return action.type;
+  }
 }
 
 // Per-atomic deferred event flags. Set by mutation helpers below; drained
@@ -181,6 +222,13 @@ export function flipCard(
 ): CardInst {
   const stack = lineStack(state.lines[lineIdx], player);
   const c = stack[stackPos];
+  // Ice 4: "This card cannot be flipped." Persistent immunity while
+  // face-up on the field. Mirrors src/compile_engine/effects.py.
+  const d = safeCardDef(c.defId);
+  if (d.key === "MN02:Ice:4" && c.faceUp) {
+    logInfo(state, `Flip on ${d.protocol} ${d.value} was blocked (immune).`);
+    return c;
+  }
   const wasUp = c.faceUp;
   c.faceUp = !c.faceUp;
   if (!wasUp && c.faceUp) {

@@ -23,9 +23,22 @@ The project ships three things in one repo:
    later AI review, browse saved games. Auth-gated; each user only sees
    their own games.
 
-The current shipped bot is **Sparkv1** (PPO iter 120, see
-[docs/model-card-sparkv1.md](docs/model-card-sparkv1.md) and the figures
-below).
+The current shipped bot is **Sparkv3** (AlphaZero-style training with
+Gumbel root selection + mixed-strategy play + pool-admission gate, iter
+20 of run `20260521-230453-az`). It beats Sparkv2 70% h2h and
+joint-distilled 73% h2h at n=200, both p < 1e-7. The model card —
+including the strategic "thesis" Sparkv3 has converged on — lives at
+[docs/model-card-sparkv3.md](docs/model-card-sparkv3.md).
+
+Earlier shipped models:
+- **Sparkv2** (PPO loose-policy iter 500): canonical NN baseline,
+  Elo 1237 on the most-recent ship-ladder.
+- **Sparkv1** (PPO iter 120): the original shipped model. See
+  [docs/model-card-sparkv1.md](docs/model-card-sparkv1.md).
+
+The training-progression figures below show the PPO trajectory that
+produced Sparkv1; the leap to Sparkv3 came from later paradigm shifts
+documented in the Sparkv3 model card.
 
 ---
 

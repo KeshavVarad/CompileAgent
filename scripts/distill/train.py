@@ -60,6 +60,10 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--value-coef", type=float, default=0.0,
+                   help="coefficient on the value-MSE loss. 0 = policy-only "
+                        "(frozen value head); >0 = joint policy+value (head "
+                        "unfrozen, MCTS root V used as the value target).")
     p.add_argument("--device", default="mps")
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
@@ -71,15 +75,17 @@ def main() -> int:
     model: PolicyValueNet = load_model_from_ckpt(args.ckpt, device)
     model.train()
 
-    # Freeze the value head. The state trunk + card/proto embeddings +
-    # action MLP all stay trainable so the policy distillation has full
-    # representational capacity. Value-head outputs follow whatever the
-    # trunk produces — frozen weights mean its calibration depends on
-    # how much the trunk drifts. Empirically this is fine for one
-    # distillation pass; if it drifts too far we'd switch to
-    # joint policy+value training with a regression loss.
+    # Value head: frozen for policy-only distillation (value_coef=0),
+    # trainable for joint mode. Joint training keeps the value head
+    # aligned with the drifting trunk; pure-policy mode preserves
+    # PPO-trained calibration of the value head but risks the trunk
+    # drifting past it (which matters for future ExIt rounds where
+    # the value head feeds MCTS leaf evaluations).
+    joint = args.value_coef > 0
     for p_ in model.value_head.parameters():
-        p_.requires_grad = False
+        p_.requires_grad = joint
+    print(f"Mode: {'joint policy+value' if joint else 'policy-only (value head frozen)'}"
+          f"  value_coef={args.value_coef}")
 
     payload = torch.load(args.labels, map_location="cpu", weights_only=False)
     meta = payload.get("meta", {})
@@ -98,6 +104,18 @@ def main() -> int:
     n = target.shape[0]
     print(f"Dataset: {n} samples on {device}")
 
+    value_target: torch.Tensor | None = None
+    if joint:
+        if "value_target" not in payload:
+            raise SystemExit(
+                "--value-coef > 0 but labels file has no `value_target` key. "
+                "Re-generate labels with the updated generate_labels.py."
+            )
+        value_target = torch.from_numpy(payload["value_target"]).to(device).float()
+        print(f"  value target: mean={value_target.mean().item():+.3f}  "
+              f"std={value_target.std().item():.3f}  "
+              f"range=[{value_target.min().item():+.2f}, {value_target.max().item():+.2f}]")
+
     opt = torch.optim.AdamW(
         [p_ for p_ in model.parameters() if p_.requires_grad],
         lr=args.lr,
@@ -113,12 +131,14 @@ def main() -> int:
     for epoch in range(args.epochs):
         perm = torch.randperm(n, device=device)
         running_loss = 0.0
+        running_pol = 0.0
+        running_val = 0.0
         running_kl = 0.0
         n_batches = 0
         for start in range(0, n, args.batch_size):
             idx = perm[start : start + args.batch_size]
             b_state = {k: v[idx] for k, v in state_tensors.items()}
-            logits, _ = model(
+            logits, value_pred = model(
                 b_state,
                 action_raw[idx],
                 action_card[idx],
@@ -135,7 +155,12 @@ def main() -> int:
                 t * log_probs,
                 torch.zeros_like(t),
             )
-            loss = -ce_per_slot.sum(dim=-1).mean()
+            pol_loss = -ce_per_slot.sum(dim=-1).mean()
+            if joint and value_target is not None:
+                val_loss = F.mse_loss(value_pred.squeeze(-1), value_target[idx])
+            else:
+                val_loss = torch.zeros((), device=device)
+            loss = pol_loss + args.value_coef * val_loss
 
             opt.zero_grad()
             loss.backward()
@@ -145,6 +170,8 @@ def main() -> int:
             )
             opt.step()
             running_loss += float(loss.item())
+            running_pol += float(pol_loss.item())
+            running_val += float(val_loss.item())
             # KL(target || model) for monitoring — same as CE up to
             # the constant H(target), but more interpretable.
             with torch.no_grad():
@@ -154,12 +181,22 @@ def main() -> int:
             running_kl += float(kl.item())
             n_batches += 1
 
-        print(
-            f"  epoch {epoch + 1}/{args.epochs}  "
-            f"loss={running_loss / max(1, n_batches):.4f}  "
-            f"KL={running_kl / max(1, n_batches):.4f}  "
-            f"elapsed={time.perf_counter() - t0:.1f}s"
-        )
+        if joint:
+            print(
+                f"  epoch {epoch + 1}/{args.epochs}  "
+                f"loss={running_loss / max(1, n_batches):.4f}  "
+                f"pol={running_pol / max(1, n_batches):.4f}  "
+                f"val={running_val / max(1, n_batches):.4f}  "
+                f"KL={running_kl / max(1, n_batches):.4f}  "
+                f"elapsed={time.perf_counter() - t0:.1f}s"
+            )
+        else:
+            print(
+                f"  epoch {epoch + 1}/{args.epochs}  "
+                f"loss={running_loss / max(1, n_batches):.4f}  "
+                f"KL={running_kl / max(1, n_batches):.4f}  "
+                f"elapsed={time.perf_counter() - t0:.1f}s"
+            )
 
     final_kl = _eval_kl(model, state_tensors, action_raw, action_card, action_proto,
                         action_mask, target, args.batch_size)

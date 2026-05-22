@@ -33,16 +33,20 @@ export type BotDescriptor = {
 
 /** The bot currently selected as the "Play vs Bot" opponent. */
 export const CURRENT_BOT: BotDescriptor = {
-  id: "sparkv2",
-  displayLabel: "Sparkv2",
+  id: "sparkv3",
+  displayLabel: "Sparkv3",
   modelPath: "/models/bot-current.onnx",
-  sourceCheckpoint: "runs/20260521-040612-loose-policy/snapshot_00500.pt",
-  trainingRun: "20260521-040612-loose-policy",
-  trainingIter: 500,
+  sourceCheckpoint: "runs/20260521-230453-az/snapshot_00020.pt",
+  trainingRun: "20260521-230453-az",
+  trainingIter: 20,
   evalSummary: {
-    vsRandomWinRate: 0.90,
+    // n=200, deterministic argmax both sides (for reproducibility with the
+    // historic ladder). Sparkv3 was trained with stochastic self-play +
+    // Gumbel root selection; in head-to-head it beats Sparkv2 70.0% and
+    // joint-distilled 73.0% (both n=200, p < 1e-7).
+    vsRandomWinRate: 0.94,
     vsGreedyWinRate: 0.70,
-    elo: 1609,
-    gamesPerMatchup: 50,
+    elo: 1344, // 3-way ship-ladder vs Sparkv2 + joint-distilled, 100 games/pair
+    gamesPerMatchup: 200,
   },
 };

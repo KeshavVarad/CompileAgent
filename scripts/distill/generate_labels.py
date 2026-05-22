@@ -39,6 +39,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from compile_engine import Game, GameConfig  # noqa: E402
+from compile_engine.agents import GreedyAgent, RandomAgent  # noqa: E402
 from compile_engine.cards import load_card_defs  # noqa: E402
 from compile_engine.nn.agent import NNAgent  # noqa: E402
 from compile_engine.nn.encoder import MAX_ACTIONS, encode_actions, encode_state  # noqa: E402
@@ -65,6 +66,15 @@ def main() -> int:
                    help="don't label states where policy top_prob >= this")
     p.add_argument("--tau", type=float, default=1.0,
                    help="temperature on Q in target = softmax(log(prior) + tau*Q)")
+    # Opponent mix. Per game, sample one opponent type from this
+    # distribution and label only the policy-under-training seat. The
+    # default (1.0/0/0) preserves the original pure-self-play behavior.
+    p.add_argument("--mix-self", type=float, default=1.0,
+                   help="fraction of games to label with self (NNAgent) as the opponent")
+    p.add_argument("--mix-greedy", type=float, default=0.0,
+                   help="fraction of games with Greedy as the opponent")
+    p.add_argument("--mix-random", type=float, default=0.0,
+                   help="fraction of games with Random as the opponent")
     # Engine config
     p.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS)
     p.add_argument("--include-expansion", action="store_true", default=True)
@@ -78,12 +88,20 @@ def main() -> int:
     model = load_model_from_ckpt(args.ckpt, device)
     defs = load_card_defs()
 
-    # Stochastic self-play agents for both seats — exploration matters
-    # here, we want diverse states in the buffer.
-    rollout_agents = [
-        NNAgent(model, device=device, stochastic=True),
-        NNAgent(model, device=device, stochastic=True),
-    ]
+    # Normalize opponent mix.
+    mix_weights = np.array(
+        [args.mix_self, args.mix_greedy, args.mix_random], dtype=np.float64
+    )
+    if mix_weights.sum() <= 0:
+        raise SystemExit("--mix-* values must sum to > 0")
+    mix_weights /= mix_weights.sum()
+    opp_kinds = ["self", "greedy", "random"]
+    mix_rng = np.random.default_rng(args.seed)
+    print(
+        f"Opponent mix: self={mix_weights[0]:.2f} "
+        f"greedy={mix_weights[1]:.2f} random={mix_weights[2]:.2f}"
+    )
+
     mcts = MCTSAgent(
         model=model,
         device=device,
@@ -109,14 +127,38 @@ def main() -> int:
     protos: list[np.ndarray] = []
     masks: list[np.ndarray] = []
     targets: list[np.ndarray] = []
+    value_targets: list[float] = []  # MCTS root V per labeled state, in [-1, 1]
 
     n_labeled = 0
     n_skipped_confident = 0
     n_decisions = 0
     n_mid_effect = 0
+    games_per_opp: Counter[str] = Counter()
+    labels_per_opp: Counter[str] = Counter()
     t0 = time.perf_counter()
 
     for g_idx in range(args.games):
+        # Pick the labeler seat and sample an opponent type for this game.
+        # Labels come ONLY from the labeler's turns, so the state
+        # distribution we train on matches the on-policy distribution
+        # against this opponent — fixing the train/eval mismatch when the
+        # eval opponent differs from the self-play partner.
+        labeler_seat = int(mix_rng.integers(0, 2))
+        opp_seat = 1 - labeler_seat
+        opp_kind = opp_kinds[int(mix_rng.choice(3, p=mix_weights))]
+        games_per_opp[opp_kind] += 1
+        opp_base_seed = args.seed + g_idx * 1000 + 17
+        if opp_kind == "self":
+            opp_agent: object = NNAgent(model, device=device, stochastic=True)
+        elif opp_kind == "greedy":
+            opp_agent = GreedyAgent(seed=opp_base_seed)
+        else:  # "random"
+            opp_agent = RandomAgent(seed=opp_base_seed)
+        labeler_agent = NNAgent(model, device=device, stochastic=True)
+        seat_agents: list[object] = [None, None]  # type: ignore[list-item]
+        seat_agents[labeler_seat] = labeler_agent
+        seat_agents[opp_seat] = opp_agent
+
         cfg = GameConfig(
             include_expansion=args.include_expansion,
             include_main2=args.include_main2,
@@ -126,20 +168,26 @@ def main() -> int:
         )
         game = Game(cfg, defs=defs)
         game.start()
+        labels_this_game = 0
         while not game.is_over():
             who = game.decider()
             legal = game.legal_actions()
             if not legal:
                 break
             n_decisions += 1
-            # Three classes of decision:
+            # Opponent's turn — just step their action, never label.
+            if who != labeler_seat:
+                action = seat_agents[who].choose(game, legal)  # type: ignore[attr-defined]
+                game.step(action)
+                continue
+            # Labeler's turn — three classes of decision:
             #   1. Forced (1 legal) or mid-effect → just step, don't label.
             #   2. Policy confident → step with policy argmax, don't label.
             #   3. Real decision → MCTS-label, then step with MCTS pick.
             if len(legal) == 1 or _mid_effect(game):
                 if _mid_effect(game):
                     n_mid_effect += 1
-                action = rollout_agents[who].choose(game, legal)
+                action = labeler_agent.choose(game, legal)
                 game.step(action)
                 continue
             # Class 2 or 3: peek at policy confidence first.
@@ -155,7 +203,9 @@ def main() -> int:
                 continue
 
             # Class 3: real label.
-            action, target_over_legal = mcts.choose_with_target(game, legal, tau=args.tau)
+            action, target_over_legal, v_root = mcts.choose_with_target(
+                game, legal, tau=args.tau, return_value=True,
+            )
             perspective = who
             state = encode_state(game, perspective)
             raw, card_ids, proto_ids, mask = encode_actions(game, legal, perspective)
@@ -176,14 +226,18 @@ def main() -> int:
             protos.append(proto_ids)
             masks.append(mask)
             targets.append(target_padded)
+            value_targets.append(v_root)
             n_labeled += 1
+            labels_this_game += 1
 
             game.step(action)
 
+        labels_per_opp[opp_kind] += labels_this_game
         elapsed = time.perf_counter() - t0
         winner = game.state.winner
         print(
-            f"  game {g_idx:3d}  winner={winner}  turns={game.state.turn:3d}  "
+            f"  game {g_idx:3d}  opp={opp_kind:<6} labeler=s{labeler_seat}  "
+            f"winner={winner}  turns={game.state.turn:3d}  "
             f"labeled={n_labeled:5d}  skipped_conf={n_skipped_confident:5d}  "
             f"mid_effect={n_mid_effect:5d}  elapsed={elapsed:6.1f}s",
             flush=True,
@@ -198,6 +252,12 @@ def main() -> int:
     print(f"  labeled (searched):   {n_labeled}")
     print(f"  fraction labeled:     {n_labeled / max(1, n_decisions):.1%}")
     print(f"Elapsed:                {elapsed:.1f}s ({elapsed / max(1, n_labeled):.2f}s/label)")
+    print()
+    print("Per-opponent breakdown:")
+    for k in opp_kinds:
+        print(
+            f"  {k:<6}  games={games_per_opp[k]:3d}  labels={labels_per_opp[k]:5d}"
+        )
 
     if n_labeled == 0:
         print("[error] no labeled states produced; aborting save.")
@@ -212,6 +272,7 @@ def main() -> int:
         "action_proto_ids": np.stack(protos),
         "action_mask": np.stack(masks),
         "target": np.stack(targets),
+        "value_target": np.asarray(value_targets, dtype=np.float32),
         "meta": {
             "n_labeled": n_labeled,
             "n_skipped_confident": n_skipped_confident,
@@ -221,6 +282,13 @@ def main() -> int:
             "tau": args.tau,
             "skip_top_prob": args.skip_top_prob,
             "mcts_cfg": vars(mcts.cfg),
+            "opp_mix": {
+                "self": float(mix_weights[0]),
+                "greedy": float(mix_weights[1]),
+                "random": float(mix_weights[2]),
+            },
+            "games_per_opp": dict(games_per_opp),
+            "labels_per_opp": dict(labels_per_opp),
         },
     }
     out = Path(args.out)
