@@ -99,6 +99,13 @@ def main() -> int:
     action_raw = torch.from_numpy(payload["action_raw"]).to(device)
     action_card = torch.from_numpy(payload["action_card_ids"]).to(device)
     action_proto = torch.from_numpy(payload["action_proto_ids"]).to(device)
+    # A5: secondary "soon-covered" card token. Older label files (pre-encoder
+    # extension) don't have this key — synthesize PAD-only arrays so legacy
+    # labels can still be loaded for warm-starts.
+    if "action_extra_card_ids" in payload:
+        action_extra = torch.from_numpy(payload["action_extra_card_ids"]).to(device)
+    else:
+        action_extra = torch.zeros_like(action_card)
     action_mask = torch.from_numpy(payload["action_mask"]).to(device).bool()
     target = torch.from_numpy(payload["target"]).to(device)
     n = target.shape[0]
@@ -124,7 +131,7 @@ def main() -> int:
 
     # Stats trackers
     initial_kl = _eval_kl(model, state_tensors, action_raw, action_card, action_proto,
-                          action_mask, target, args.batch_size)
+                          action_extra, action_mask, target, args.batch_size)
     print(f"Pre-train KL(target || model) = {initial_kl:.4f}")
 
     t0 = time.perf_counter()
@@ -143,6 +150,7 @@ def main() -> int:
                 action_raw[idx],
                 action_card[idx],
                 action_proto[idx],
+                action_extra[idx],
                 action_mask[idx],
             )
             # The model already masks padded slots to -1e9 internally,
@@ -199,7 +207,7 @@ def main() -> int:
             )
 
     final_kl = _eval_kl(model, state_tensors, action_raw, action_card, action_proto,
-                        action_mask, target, args.batch_size)
+                        action_extra, action_mask, target, args.batch_size)
     print(f"Post-train KL(target || model) = {final_kl:.4f}  (Δ {final_kl - initial_kl:+.4f})")
 
     # Save with the same payload schema the eval pipeline uses.
@@ -230,6 +238,7 @@ def _eval_kl(
     raw: torch.Tensor,
     card: torch.Tensor,
     proto: torch.Tensor,
+    extra: torch.Tensor,
     mask: torch.Tensor,
     target: torch.Tensor,
     batch_size: int,
@@ -243,7 +252,7 @@ def _eval_kl(
         end = min(n, start + batch_size)
         b_state = {k: v[start:end] for k, v in state.items()}
         logits, _ = model(b_state, raw[start:end], card[start:end],
-                          proto[start:end], mask[start:end])
+                          proto[start:end], extra[start:end], mask[start:end])
         log_probs = F.log_softmax(logits, dim=-1)
         t = target[start:end]
         m = mask[start:end]

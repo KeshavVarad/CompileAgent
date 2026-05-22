@@ -151,6 +151,7 @@ class _Sample:
     action_raw: np.ndarray                      # [MAX_ACTIONS, F_raw]
     action_card_ids: np.ndarray                 # [MAX_ACTIONS]
     action_proto_ids: np.ndarray                # [MAX_ACTIONS]
+    action_extra_card_ids: np.ndarray           # [MAX_ACTIONS] — A5 soon-covered
     action_mask: np.ndarray                     # [MAX_ACTIONS] bool
     pi_target: np.ndarray                       # [MAX_ACTIONS], sums to 1 over legal prefix
     outcome: float                              # +1 / -1 / 0 from labeler's POV
@@ -168,6 +169,7 @@ def _stack(samples: list[_Sample], device: torch.device) -> dict[str, torch.Tens
         "action_raw": torch.from_numpy(np.stack([s.action_raw for s in samples])).to(device),
         "action_card_ids": torch.from_numpy(np.stack([s.action_card_ids for s in samples])).to(device),
         "action_proto_ids": torch.from_numpy(np.stack([s.action_proto_ids for s in samples])).to(device),
+        "action_extra_card_ids": torch.from_numpy(np.stack([s.action_extra_card_ids for s in samples])).to(device),
         "action_mask": torch.from_numpy(np.stack([s.action_mask for s in samples])).to(device).bool(),
         "pi_target": torch.from_numpy(np.stack([s.pi_target for s in samples])).to(device),
         "outcome": torch.from_numpy(
@@ -306,7 +308,7 @@ def play_self_game(
         # Snapshot the state + actions for training. Encode against the
         # trainee's perspective (the engine's decider, which is `who`).
         state = encode_state(game, who)
-        raw, card_ids, proto_ids, mask = encode_actions(game, legal, who)
+        raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(game, legal, who)
 
         pi_padded = np.zeros(MAX_ACTIONS, dtype=np.float32)
         n_t = min(MAX_ACTIONS, len(target_over_legal))
@@ -320,6 +322,7 @@ def play_self_game(
             action_raw=raw,
             action_card_ids=card_ids,
             action_proto_ids=proto_ids,
+            action_extra_card_ids=extra_card_ids,
             action_mask=mask,
             pi_target=pi_padded,
             outcome=0.0,  # filled in below
@@ -402,6 +405,7 @@ def az_update(
                 batch["action_raw"][idx_t],
                 batch["action_card_ids"][idx_t],
                 batch["action_proto_ids"][idx_t],
+                batch["action_extra_card_ids"][idx_t],
                 batch["action_mask"][idx_t],
             )
 

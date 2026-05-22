@@ -318,7 +318,8 @@ def ppo_update(
     for epoch in range(cfg.ppo_epochs):
         for mb in minibatches(batch, cfg.batch_size, rng):
             logits, value = model(
-                mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids, mb.action_mask,
+                mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids,
+                mb.action_extra_card_ids, mb.action_mask,
             )
             log_probs = F.log_softmax(logits, dim=-1)
             new_logp = log_probs.gather(1, mb.action_idx.unsqueeze(-1)).squeeze(-1)

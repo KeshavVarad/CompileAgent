@@ -27,6 +27,7 @@ class StepRecord:
     action_raw: np.ndarray
     action_card_ids: np.ndarray
     action_proto_ids: np.ndarray
+    action_extra_card_ids: np.ndarray
     action_mask: np.ndarray
     action_idx: int
     log_prob: float
@@ -43,13 +44,15 @@ def _state_to_torch(state: dict[str, np.ndarray], device: torch.device) -> dict[
 
 
 def _to_torch_actions(
-    raw: np.ndarray, card_ids: np.ndarray, proto_ids: np.ndarray, mask: np.ndarray,
+    raw: np.ndarray, card_ids: np.ndarray, proto_ids: np.ndarray,
+    extra_card_ids: np.ndarray, mask: np.ndarray,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     return (
         torch.from_numpy(raw).unsqueeze(0).to(device),
         torch.from_numpy(card_ids).unsqueeze(0).to(device),
         torch.from_numpy(proto_ids).unsqueeze(0).to(device),
+        torch.from_numpy(extra_card_ids).unsqueeze(0).to(device),
         torch.from_numpy(mask).unsqueeze(0).to(device),
     )
 
@@ -93,11 +96,15 @@ class NNAgent:
             raise RuntimeError("NNAgent.choose called with empty legal actions")
         perspective = game.decider()
         state = encode_state(game, perspective)
-        raw, card_ids, proto_ids, mask = encode_actions(game, legal, perspective)
+        raw, card_ids, proto_ids, extra_card_ids, mask = encode_actions(
+            game, legal, perspective,
+        )
         s = _state_to_torch(state, self.device)
-        ar, ac, ap, am = _to_torch_actions(raw, card_ids, proto_ids, mask, self.device)
+        ar, ac, ap_t, ae, am = _to_torch_actions(
+            raw, card_ids, proto_ids, extra_card_ids, mask, self.device,
+        )
         with torch.no_grad():
-            logits, value = self.model(s, ar, ac, ap, am)
+            logits, value = self.model(s, ar, ac, ap_t, ae, am)
         logits = logits[0]
         value_scalar = float(value[0].item())
         # Renormalise over legal actions only.
@@ -117,6 +124,7 @@ class NNAgent:
                 action_raw=raw,
                 action_card_ids=card_ids,
                 action_proto_ids=proto_ids,
+                action_extra_card_ids=extra_card_ids,
                 action_mask=mask,
                 action_idx=idx,
                 log_prob=log_prob,
