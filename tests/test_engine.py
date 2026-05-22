@@ -1211,6 +1211,106 @@ def test_uncover_trigger_fires_when_top_card_deleted():
     )
 
 
+def test_compile_with_control_offers_rearrange_then_resets():
+    """Codex p.5-6: 'When the player with the control component compiles
+    or refreshes, first the control component is returned to its neutral
+    position and that player may rearrange one player's protocols —
+    either theirs or their opponent's — then they complete their compile
+    or refresh.' Codex p.8: control resets even if you skip rearrange.
+
+    Regression for playtester bug: compiling with control gave no
+    rearrange prompt and control didn't reset."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=50))
+    g.set_predetermined_draft([["Light", "Death", "Fire"], ["Spirit", "Water", "Speed"]])
+    defs = load_card_defs()
+    fire_4 = next(d for d in defs if d.key == "MN01:Fire:4")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0 has 3 face-up Fire 4s in line 2 (Fire protocol → value 12, compileable).
+    g.state.lines[2].p0_stack = [
+        CardInst(inst_id=50100 + i, def_id=fire_4.def_id, owner=0, face_up=True)
+        for i in range(3)
+    ]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.control_holder = 0  # ap holds control
+    pre_protocols = list(g.state.players[0].protocols)
+    g.state.phase = Phase.CHECK_COMPILE
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Initiate compile of line 2.
+    g.step(Action(type=ActionType.COMPILE_LINE, line_index=2))
+    # Should now have a pending choice: control rearrange prompt.
+    choice = g._pending[-1].last_choice if g._pending else None
+    assert choice is not None, "expected control rearrange prompt"
+    assert "Control component" in choice.prompt, (
+        f"expected rearrange prompt; got: {choice.prompt}"
+    )
+    # Pick "skip" → control should reset, compile completes.
+    skip_idx = next(i for i, t in enumerate(choice.targets) if t == -1)
+    g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=skip_idx))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Verify: control reset to None, compile completed (line 2 protocol flipped).
+    assert g.state.control_holder is None, (
+        f"control_holder should reset to None on compile-with-control; got {g.state.control_holder}"
+    )
+    assert g.state.players[0].compiled[2], "Fire protocol should be compiled"
+    # Protocols themselves should be unchanged (we skipped rearrange).
+    assert list(g.state.players[0].protocols) == pre_protocols, (
+        "protocols should be unchanged when player skipped rearrange"
+    )
+
+
+def test_compile_with_control_rearrange_swaps_protocols():
+    """Same Codex clarification — verify the rearrange path actually
+    swaps the chosen pair of protocols."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=51))
+    g.set_predetermined_draft([["Light", "Death", "Fire"], ["Spirit", "Water", "Speed"]])
+    defs = load_card_defs()
+    fire_4 = next(d for d in defs if d.key == "MN01:Fire:4")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    g.state.lines[2].p0_stack = [
+        CardInst(inst_id=51100 + i, def_id=fire_4.def_id, owner=0, face_up=True)
+        for i in range(3)
+    ]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.control_holder = 0
+    g.state.phase = Phase.CHECK_COMPILE
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.step(Action(type=ActionType.COMPILE_LINE, line_index=2))
+    # Pick "yours" → expect a swap-pair prompt.
+    choice = g._pending[-1].last_choice
+    yours_idx = next(i for i, t in enumerate(choice.targets) if t == 0)
+    g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=yours_idx))
+    choice2 = g._pending[-1].last_choice
+    assert choice2 is not None and "Swap which two" in choice2.prompt
+    # Pick the first swap pair (L0<->L1).
+    g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=0))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    assert g.state.control_holder is None
+    # Protocols swapped: Light↔Death (was [Light, Death, Fire] → [Death, Light, Fire]).
+    assert g.state.players[0].protocols[0] == "Death"
+    assert g.state.players[0].protocols[1] == "Light"
+
+
 def test_gravity_1_allows_shifting_opp_cards():
     """Codex p.3 default targeting: 'your cards or your opponent's cards
     can both be selected' unless restricted. Gravity 1 says 'Shift 1

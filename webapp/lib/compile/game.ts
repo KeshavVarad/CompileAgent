@@ -582,17 +582,24 @@ export class Game {
         if (fn) interrupts.push({ pl, c, fn });
       }
     }
-    if (interrupts.length === 0) {
+    const ap = st.currentPlayer;
+    const hasControl = st.controlHolder === ap;
+
+    if (interrupts.length === 0 && !hasControl) {
       this.compileFinalize(a);
       return;
     }
-    const ap = st.currentPlayer;
-    // Push finalizer first (drains last), then interrupts in reverse so the
-    // first-listed drains first under LIFO.
+
+    // Codex p.5: control_rearrange resolves before compile_finalize.
+    // LIFO push order (drain forward): control_rearrange → interrupts → finalizer.
     this.pushEffect(this.compileFinalizerGen(a));
     for (let i = interrupts.length - 1; i >= 0; i--) {
       const it = interrupts[i];
       this.pushEffect(it.fn(st, ap, ln, it.c));
+    }
+    if (hasControl) {
+      const { controlRearrangeGen } = require("./effects");
+      this.pushEffect(controlRearrangeGen(st, ap));
     }
   }
 
@@ -640,7 +647,25 @@ export class Game {
       // post-refresh event flag is set — otherwise after_self_refresh /
       // after_opp_refresh / after_any_refresh would never fire on the
       // player's own REFRESH action.
-      refreshPlayer(st, ap);
+      //
+      // If ap holds the control component, Codex p.5 requires the
+      // rearrange-protocols prompt to resolve *before* the refresh
+      // draws. Push two generators in LIFO reverse order so the
+      // rearrange drains first, then the refresh finalizer runs the
+      // draws + sets the post-refresh flag.
+      if (st.controlHolder === ap) {
+        const { controlRearrangeGen } = require("./effects");
+        const player = ap;
+        // Generator that runs the actual refresh after control resolves.
+        const refreshAfter = (function* () {
+          refreshPlayer(st, player);
+          if (false) yield {} as Choice;
+        })();
+        this.pushEffect(refreshAfter);
+        this.pushEffect(controlRearrangeGen(st, ap));
+      } else {
+        refreshPlayer(st, ap);
+      }
       st.phase = "CHECK_CACHE"; return;
     }
     if (a.type === "PLAY_FACE_UP") {

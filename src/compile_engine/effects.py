@@ -387,6 +387,53 @@ def refresh_player(state: GameState, player: int) -> None:
     _flag_after_refresh(state, player)
 
 
+def _control_rearrange_gen(state: GameState, ap: int):
+    """Generator yielded before compile/refresh when ap holds the control
+    component. Codex p.5-6: "When the player with the control component
+    compiles or refreshes, first the control component is returned to its
+    neutral position and that player may rearrange one player's protocols
+    — either theirs or their opponent's — then they complete their compile
+    or refresh." Codex p.8: "When you compile or refresh while having the
+    control component, it resets to the neutral position, even if you
+    choose not to rearrange any protocols." """
+    if state.control_holder != ap:
+        return
+    opp = 1 - ap
+    idx = yield Choice(
+        prompt="Control component — rearrange whose protocols? (or skip)",
+        options=[
+            f"yours (P{ap + 1})",
+            f"opp's (P{opp + 1})",
+            "skip (no rearrange)",
+        ],
+        targets=[ap, opp, -1],
+        optional=False,
+        decider=ap,
+    )
+    target_player = None
+    if idx == 0:
+        target_player = ap
+    elif idx == 1:
+        target_player = opp
+    if target_player is not None:
+        pairs = [(a, b) for a in range(NUM_LINES) for b in range(a + 1, NUM_LINES)]
+        opts = [f"swap P{target_player + 1} L{a}<->L{b}" for a, b in pairs]
+        pidx = yield Choice(
+            prompt=f"Swap which two of P{target_player + 1}'s protocols?",
+            options=opts,
+            targets=list(pairs),
+            optional=False,
+            decider=ap,
+        )
+        if 0 <= pidx < len(pairs):
+            a, b = pairs[pidx]
+            ps = state.players[target_player]
+            ps.protocols[a], ps.protocols[b] = ps.protocols[b], ps.protocols[a]
+            ps.compiled[a], ps.compiled[b] = ps.compiled[b], ps.compiled[a]
+    # Reset control component to neutral position (unconditional per Codex p.8).
+    state.control_holder = None
+
+
 # ---------------------------------------------------------------------------
 # Target enumeration
 # ---------------------------------------------------------------------------
