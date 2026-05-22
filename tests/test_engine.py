@@ -1155,6 +1155,62 @@ def test_assim_1_fires_on_either_player_refresh():
     )
 
 
+def test_uncover_trigger_fires_when_top_card_deleted():
+    """Codex p.3 "Middle Command — Immediate: Resolve this active text upon
+    card play/flip/uncover." When the top card of a stack is deleted, the
+    under-card (if face-up) is newly uncovered and its middle should fire.
+
+    Regression: the uncover-trigger condition in delete/return/shift was
+    previously inverted (`if not was_top`), so the cascade never fired on
+    a top delete (and wrongly fired on middle/bottom deletes that didn't
+    change the top)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import delete_card_from_field
+    g = Game(GameConfig(seed=30))
+    g.set_predetermined_draft([["Light", "Death", "Fire"], ["Spirit", "Water", "Speed"]])
+    defs = load_card_defs()
+    light_2 = next(d for d in defs if d.key == "MN01:Light:2")  # middle Draw 2
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    under = CardInst(inst_id=30001, def_id=light_2.def_id, owner=0, face_up=True)
+    top = CardInst(inst_id=30002, def_id=fire_0.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [under, top]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=30100 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Delete the top card (Fire 0). Under (Light 2) should fire its middle
+    # ("Draw 2 cards") via the uncover trigger.
+    delete_card_from_field(g.state, 0, 0, 1)
+    g._drive()
+    assert len(g.state.players[0].hand) == 2 and len(g.state.players[0].deck) == 3, (
+        f"Light 2 middle should fire on uncover after Fire 0 deleted from top; "
+        f"hand=0→{len(g.state.players[0].hand)} deck=5→{len(g.state.players[0].deck)}"
+    )
+    # Inverse: deleting the bottom card (under unchanged top) → no uncover.
+    g.state.lines[0].p0_stack = [under, top]
+    g.state.players[0].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=30200 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.triggers = []
+    g._pending = []
+    delete_card_from_field(g.state, 0, 0, 0)  # delete bottom
+    g._drive()
+    assert len(g.state.players[0].hand) == 0 and len(g.state.players[0].deck) == 5, (
+        "deleting the bottom card does not change top — no uncover trigger should fire"
+    )
+
+
 def test_courage_3_prompts_for_tied_opp_lines():
     """Codex p.9 clarification: when multiple lines tie for opp's highest
     total value, the Courage 3 owner picks. Prior to the fix, the engine

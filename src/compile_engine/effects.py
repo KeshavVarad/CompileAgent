@@ -217,8 +217,10 @@ def delete_card_from_field(
     c = stack.pop(stack_pos)
     c.face_up = True  # trash is always face-up
     state.players[c.owner].trash.append(c)
-    # If we removed a cover, the new top (if face-up) becomes uncovered → trigger.
-    if was_top is False and stack and stack[-1].face_up:
+    # If we removed the top card, the new top (if face-up) is newly
+    # uncovered → fire its middle (Codex: "Middle Command — Immediate:
+    # Resolve this active text upon card play/flip/uncover.")
+    if was_top and stack and stack[-1].face_up:
         state.triggers.append(("uncover", line_idx, player, stack[-1]))
     # "After you delete cards:" is attributed to the player who caused the
     # delete — in nearly every case state.current_player. (Edge cases like
@@ -310,7 +312,8 @@ def shift_card(
         wc = WHEN_COVERED_EFFECTS.get(d_under.key)
         if wc is not None:
             engine._push_effect(wc(state, soon_covered.owner, dst_line, soon_covered))
-    if not was_top and src_stack and src_stack[-1].face_up:
+    # Removing top of src exposes the under-card → fire its middle.
+    if was_top and src_stack and src_stack[-1].face_up:
         nt = src_stack[-1]
         d_nt = state.defs[nt.def_id]
         if d_nt.middle_text and not middle_suppressed(state, src_line, nt):
@@ -329,7 +332,8 @@ def return_card_to_hand(
     c = stack.pop(stack_pos)
     c.face_up = False
     state.players[c.owner].hand.append(c)
-    if not was_top and stack and stack[-1].face_up:
+    # Removing the top exposes the under-card → fire its middle on uncover.
+    if was_top and stack and stack[-1].face_up:
         state.triggers.append(("uncover", line_idx, player, stack[-1]))
     _check_diversity_6_self_destruct(state)
     return c

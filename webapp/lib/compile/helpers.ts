@@ -213,7 +213,8 @@ export function deleteCardFromField(
   const [c] = stack.splice(stackPos, 1);
   c.faceUp = true;
   state.players[c.owner].trash.push(c);
-  if (!wasTop && stack.length && stack[stack.length - 1].faceUp) {
+  // Removing the top exposes the under-card → fire its middle on uncover.
+  if (wasTop && stack.length && stack[stack.length - 1].faceUp) {
     state.triggers.push({ kind: "uncover", line: lineIdx, player, card: stack[stack.length - 1] });
   }
   // "After you delete cards:" — attribute to whoever is the active
@@ -282,7 +283,8 @@ export function shiftCard(
       kind: "when_covered", line: dstLine, player: soonCovered.owner, card: soonCovered,
     });
   }
-  if (!wasTop && stackSrc.length && stackSrc[stackSrc.length - 1].faceUp) {
+  // Removing top of src exposes the under-card → fire its middle.
+  if (wasTop && stackSrc.length && stackSrc[stackSrc.length - 1].faceUp) {
     state.triggers.push({ kind: "uncover", line: srcLine, player: srcPlayer, card: stackSrc[stackSrc.length - 1] });
   }
   checkDiversity6SelfDestruct(state);
@@ -300,7 +302,8 @@ export function returnCardToHand(
   const [c] = stack.splice(stackPos, 1);
   c.faceUp = false;
   state.players[c.owner].hand.push(c);
-  if (!wasTop && stack.length && stack[stack.length - 1].faceUp) {
+  // Removing the top exposes the under-card → fire its middle.
+  if (wasTop && stack.length && stack[stack.length - 1].faceUp) {
     state.triggers.push({ kind: "uncover", line: lineIdx, player, card: stack[stack.length - 1] });
   }
   checkDiversity6SelfDestruct(state);
