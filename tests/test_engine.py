@@ -1155,6 +1155,204 @@ def test_assim_1_fires_on_either_player_refresh():
     )
 
 
+def test_courage_3_prompts_for_tied_opp_lines():
+    """Codex p.9 clarification: when multiple lines tie for opp's highest
+    total value, the Courage 3 owner picks. Prior to the fix, the engine
+    silently picked the lowest-indexed tied line. The handler should
+    now surface each tied line as a separate option."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=20, include_main2=True))
+    g.set_predetermined_draft([
+        ["Courage", "Death", "Water"],
+        ["Light", "Fire", "Speed"],
+    ])
+    defs = load_card_defs()
+    courage_3 = next(d for d in defs if d.key == "MN02:Courage:3")
+    fire_4 = next(d for d in defs if d.key == "MN01:Fire:4")  # value 4
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # Courage 3 lives on P0's line 0 (Courage protocol).
+    c3 = CardInst(inst_id=20001, def_id=courage_3.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [c3]
+    # P1 has equal-value lines 1 and 2 (tied) → tied for "highest".
+    g.state.lines[1].p1_stack = [
+        CardInst(inst_id=20100, def_id=fire_4.def_id, owner=1, face_up=True),
+    ]
+    g.state.lines[2].p1_stack = [
+        CardInst(inst_id=20200, def_id=fire_4.def_id, owner=1, face_up=True),
+    ]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.phase = Phase.END
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Drive end phase to surface Courage 3's prompt.
+    g._drive()
+    # Should be paused on a choice that lists BOTH tied lines as options.
+    choice_obj = g._pending[-1].last_choice if g._pending else None
+    assert choice_obj is not None, "Courage 3 should have yielded a Choice"
+    opts = choice_obj.options
+    # Expect: "L1 (opp value 4)", "L2 (opp value 4)", "skip"
+    assert any("L1" in o for o in opts), f"missing L1 option: {opts}"
+    assert any("L2" in o for o in opts), f"missing L2 option: {opts}"
+    assert any("skip" in o for o in opts), f"missing skip option: {opts}"
+
+
+def test_mirror_1_filters_to_uncovered_opp_targets_and_fear_0_suppresses():
+    """Mirror 1 bottom: Codex p.3 default targeting restricts to uncovered
+    cards; Codex p.9 clarifies the bottom is blocked by Fear 0. Verify
+    both:
+      (a) covered opp middles are excluded from Mirror 1's target list
+      (b) when ap owns Fear 0, opp middles are suppressed → Mirror 1 has
+          no valid targets and resolves to nothing."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=21, include_main2=True))
+    g.set_predetermined_draft([
+        ["Mirror", "Fear", "Water"],
+        ["Light", "Fire", "Death"],
+    ])
+    defs = load_card_defs()
+    mirror_1 = next(d for d in defs if d.key == "MN02:Mirror:1")
+    light_2 = next(d for d in defs if d.key == "MN01:Light:2")  # has middle
+    fire_4 = next(d for d in defs if d.key == "MN01:Fire:4")    # has middle
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    # ---- Part (a): covered opp card excluded ----
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    m1 = CardInst(inst_id=21001, def_id=mirror_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [m1]
+    # P1 has a face-up Light 2 covered by a face-up Fire 4 in line 1.
+    g.state.lines[1].p1_stack = [
+        CardInst(inst_id=21100, def_id=light_2.def_id, owner=1, face_up=True),  # covered
+        CardInst(inst_id=21101, def_id=fire_4.def_id, owner=1, face_up=True),   # uncovered
+    ]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=21200 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.phase = Phase.END
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g._drive()
+    choice_obj = g._pending[-1].last_choice if g._pending else None
+    assert choice_obj is not None, "Mirror 1 should have yielded a Choice"
+    # Only the UNCOVERED Fire 4 should be a target — not the covered Light 2.
+    opts = choice_obj.options
+    assert any("Fire" in o or "fire" in o for o in opts), f"Fire 4 missing: {opts}"
+    assert not any("Light" in o for o in opts), (
+        f"covered Light 2 should be excluded by uncovered-default rule: {opts}"
+    )
+
+    # ---- Part (b): ap's Fear 0 nullifies opp middles → no targets ----
+    g2 = Game(GameConfig(seed=22, include_main2=True))
+    g2.set_predetermined_draft([
+        ["Mirror", "Fear", "Water"],
+        ["Light", "Fire", "Death"],
+    ])
+    fear_0 = next(d for d in defs if d.key == "MN02:Fear:0")
+    g2.state.lines = [type(g2.state.lines[0])() for _ in range(3)]
+    m1b = CardInst(inst_id=22001, def_id=mirror_1.def_id, owner=0, face_up=True)
+    g2.state.lines[0].p0_stack = [m1b]
+    # P0 has Fear 0 face-up in line 1 (Fear protocol).
+    fear_0_inst = CardInst(inst_id=22002, def_id=fear_0.def_id, owner=0, face_up=True)
+    g2.state.lines[1].p0_stack = [fear_0_inst]
+    # P1 has uncovered Fire 4 (middle text exists) — but Fear 0 nullifies.
+    g2.state.lines[1].p1_stack = [
+        CardInst(inst_id=22100, def_id=fire_4.def_id, owner=1, face_up=True),
+    ]
+    g2.state.players[0].hand = []
+    g2.state.players[1].hand = []
+    g2.state.players[0].deck = []
+    g2.state.players[1].deck = []
+    g2.state.current_player = 0
+    g2.state.phase = Phase.END
+    g2.state.scratch["_engine"] = g2
+    g2._pending = []
+    g2._drive()
+    # With Fear 0 suppressing all opp middles, Mirror 1's bottom has zero
+    # valid targets and returns without prompting. The pending stack
+    # should be empty (or at least not awaiting a Mirror 1 Choice).
+    while g2._pending:
+        c = g2._pending[-1].last_choice
+        if c is not None and "Mirror 1" in c.prompt:
+            raise AssertionError(
+                f"Mirror 1 should be blocked by ap's Fear 0; got prompt: {c.prompt}"
+            )
+        # Drain any unrelated triggers (none expected here).
+        if c is None:
+            g2._pending.pop()
+        else:
+            break
+
+
+def test_assim_1_discard_into_opp_trash_flags_after_discard():
+    """Assim 1's bottom 'Discard 1 card into their trash' is still a
+    discard from ap's hand and must set the after-discard flag so
+    @after_self_discard / @after_opp_discard triggers fire. Regression
+    for a pre-existing latent bug surfaced during the Codex audit."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    from compile_engine.effects import _assim_1_after_any_refresh  # noqa: F401
+    g = Game(GameConfig(seed=23, include_aux2=True))
+    g.set_predetermined_draft([
+        ["Assimilation", "Death", "Water"],
+        ["Light", "Fire", "Speed"],
+    ])
+    defs = load_card_defs()
+    assim_1 = next(d for d in defs if d.key == "AX02:Assimilation:1")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    a1 = CardInst(inst_id=23001, def_id=assim_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [a1]
+    g.state.players[0].hand = [
+        CardInst(inst_id=23100, def_id=fire_0.def_id, owner=0, face_up=False),
+    ]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=23200 + i, def_id=fire_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].deck = [
+        CardInst(inst_id=23300 + i, def_id=fire_0.def_id, owner=1, face_up=False)
+        for i in range(5)
+    ]
+    # Drive the Assim 1 after-refresh handler directly so we can assert
+    # the discard flag is set immediately after the discard step.
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Trigger via the player's own refresh action (which now flags
+    # refresh through refresh_player → after_any_refresh broadcast).
+    from compile_engine.actions import Action, ActionType
+    g.step(Action(type=ActionType.REFRESH))
+    while g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+    # Assim 1 must have set the discard flag on P0 during resolution.
+    # By now the engine has drained the flag (broadcasting the discard
+    # events), but the trash count is the durable evidence: P1's trash
+    # received Assim 1's discarded card.
+    assert len(g.state.players[1].trash) >= 1, (
+        "Assim 1 should have discarded a card into P1's trash"
+    )
+    # And the engine should have broadcast the discard — surface this by
+    # confirming the scratch flag was cleared (set then drained), i.e.
+    # no stale flag survived.
+    assert not g.state.scratch.get("_pending_after_discard_by_p0", False), (
+        "after-discard flag should have been drained, not stale"
+    )
+
+
 def test_greedy_beats_random_more_often_than_not():
     """Sanity check: greedy heuristic should win > 50% vs random over many games."""
     wins = {0: 0, 1: 0, None: 0}

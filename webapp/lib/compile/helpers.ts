@@ -133,7 +133,7 @@ export function formatActionLabel(state: GameState, action: Action): string {
 // Per-atomic deferred event flags. Set by mutation helpers below; drained
 // by the engine after the current effect stack resolves (mirrors the
 // Python _drain_pending_after_events).
-function flagAfterDiscard(state: GameState, player: PlayerIndex): void {
+export function flagAfterDiscard(state: GameState, player: PlayerIndex): void {
   (state.scratch as Record<string, unknown>)[`_pending_after_discard_by_p${player}`] = true;
 }
 function flagAfterDraw(state: GameState, player: PlayerIndex): void {
