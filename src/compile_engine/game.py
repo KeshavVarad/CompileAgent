@@ -997,27 +997,25 @@ class Game:
     def _do_end_phase(self) -> bool:
         st = self.state
         ap = st.current_player
-        any_pushed = False
         # Per Codex: End effects on top text fire whenever the card is face-up
         # (top text is persistent under cover). Bottom-text End triggers only
         # while uncovered. We iterate all face-up cards and let each handler
-        # decide if its conditions are met.
-        for ln in range(NUM_LINES):
-            stack = list(st.lines[ln].stack(ap))  # snapshot — effects may mutate
-            for c in stack:
-                if not c.face_up:
-                    continue
-                d = st.defs[c.def_id]
-                fn = get_end_effect(d)
-                if fn is not None:
-                    self._push_effect(fn(st, ap, ln, c))
-                    any_pushed = True
-        if any_pushed:
-            # We'll re-enter end phase logic after effects resolve. For
-            # simplicity, mark phase to re-enter END so the next _drive
-            # invocation continues. But we need to make sure end actions
-            # only fire once. Use a flag:
-            if not st.scratch.pop("end_resolved", False):
+        # decide if its conditions are met. Effects are pushed once per turn
+        # — gated by the `end_resolved` flag so the re-entry (after drain)
+        # does not re-fire them.
+        if not st.scratch.get("end_resolved", False):
+            any_pushed = False
+            for ln in range(NUM_LINES):
+                stack = list(st.lines[ln].stack(ap))  # snapshot — effects may mutate
+                for c in stack:
+                    if not c.face_up:
+                        continue
+                    d = st.defs[c.def_id]
+                    fn = get_end_effect(d)
+                    if fn is not None:
+                        self._push_effect(fn(st, ap, ln, c))
+                        any_pushed = True
+            if any_pushed:
                 st.scratch["end_resolved"] = True
                 return True
         # Reset end flag for next turn.

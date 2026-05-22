@@ -1192,9 +1192,13 @@ def _love_1(state, ap, li, card):
         yield  # pragma: no cover
 
 
-@bottom_on_play("AX01:Love:1")
-def _love_1_bottom(state, ap, li, card):
-    # You may give 1 card from your hand to your opponent. If you do, draw 2 cards.
+# Love 1 bottom — "End: You may give 1 card from your hand to your
+# opponent. If you do, draw 2 cards." Fires only while uncovered.
+@end_trigger("AX01:Love:1")
+def _love_1_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     hand = state.players[ap].hand
     if not hand:
         return
@@ -1549,9 +1553,13 @@ def _fire_2(state, ap, li, card):
     return_card_to_hand(state, sln, spl, spos)
 
 
-@bottom_on_play("MN01:Fire:3")
-def _fire_3_bottom(state, ap, li, card):
-    # You may discard 1. If you do, flip 1 card.
+# Fire 3 bottom — "End: You may discard 1 card. If you do, flip 1 card."
+# Fires only while uncovered.
+@end_trigger("MN01:Fire:3")
+def _fire_3_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     if not state.players[ap].hand:
         return
     idx0 = yield Choice(
@@ -1766,8 +1774,13 @@ def _light_0(state, ap, li, card):
         draw_cards(state, ap, FACE_DOWN_BASE_VALUE)
 
 
-@bottom_on_play("MN01:Light:1")
-def _light_1_bottom(state, ap, li, card):
+# Light 1 bottom — "End: Draw 1 card." Bottom-tier End: triggers fire
+# only while the card is face-up + uncovered.
+@end_trigger("MN01:Light:1")
+def _light_1_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     draw_cards(state, ap, 1)
     if False:
         yield  # pragma: no cover
@@ -1948,9 +1961,13 @@ def _plague_3(state, ap, li, card):
         yield  # pragma: no cover
 
 
-@bottom_on_play("MN01:Plague:4")
-def _plague_4_bottom(state, ap, li, card):
-    # Your opponent deletes 1 of their face-down cards. You may flip this card.
+# Plague 4 bottom — "End: Your opponent deletes 1 of their face-down cards.
+# You may flip this card." Fires only while uncovered.
+@end_trigger("MN01:Plague:4")
+def _plague_4_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     opp = 1 - ap
     targets = []
     for ln in range(NUM_LINES):
@@ -1994,14 +2011,22 @@ def _psychic_0(state, ap, li, card):
     state.log.append(f"P{opp} hand revealed: {desc or '<empty>'}")
 
 
-@bottom_on_play("MN01:Psychic:1")
-def _psychic_1_bottom(state, ap, li, card):
-    # Flip this card.
-    for ln in range(NUM_LINES):
-        s = state.lines[ln].stack(ap)
-        if card in s:
-            card.face_up = not card.face_up
-            return
+# Psychic 1 bottom: "Start: Flip this card." Fires at the start step of
+# the player's turn while the card is face-up + UNCOVERED. Bottom-tier
+# effects only resolve when uncovered per the Codex — so covering
+# Psychic 1 lets you keep it face-up indefinitely (with the top
+# "opp must play face-down" persistent effect remaining active even
+# while covered). This is the canonical Compile "Psychic 1 lock" combo.
+@start_trigger("MN01:Psychic:1")
+def _psychic_1_start(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    # Bottom-tier "Start:" effects are auxiliary — they only fire when
+    # the card is uncovered (top of its stack).
+    if not stack or stack[-1] is not card:
+        return
+    # Flip face-down — deactivates the top lockout. No trigger pushed
+    # since this is a deactivation, not an on-flip-up event.
+    card.face_up = False
     if False:
         yield  # pragma: no cover
 
@@ -2042,9 +2067,13 @@ def _psychic_3(state, ap, li, card):
     shift_card(state, sln, spl, spos, dest[didx])
 
 
-@bottom_on_play("MN01:Psychic:4")
-def _psychic_4_bottom(state, ap, li, card):
-    # You may return 1 of your opponent's cards. If you do, flip this card.
+# Psychic 4 bottom — "End: You may return 1 of your opponent's cards. If
+# you do, flip this card." Fires only while uncovered.
+@end_trigger("MN01:Psychic:4")
+def _psychic_4_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     targets = _enumerate_uncovered(state, owner="opponent", active_player=ap)
     if not targets:
         return
@@ -2155,8 +2184,13 @@ def _speed_3(state, ap, li, card):
     shift_card(state, sln, spl, spos, dest[didx])
 
 
-@bottom_on_play("MN01:Speed:3")
-def _speed_3_bottom(state, ap, li, card):
+# Speed 3 bottom — "End: You may shift 1 of your cards. If you do, flip
+# this card." Fires only while uncovered.
+@end_trigger("MN01:Speed:3")
+def _speed_3_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     targets = _enumerate_shift_targets(state, owner="self", active_player=ap)
     if not targets:
         return
@@ -2417,8 +2451,14 @@ def _chaos_0(state, ap, li, card):
             flip_card(state, t[0], t[1], t[2])
 
 
-@bottom_on_play("MN02:Chaos:0")
-def _chaos_0_bottom(state, ap, li, card):
+# Chaos 0 bottom — "Start: Draw the top card of your opponent's deck.
+# Your opponent draws the top card of your deck." Fires only while
+# uncovered.
+@start_trigger("MN02:Chaos:0")
+def _chaos_0_start(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     _both_players_draw_top(state, ap)
     if False:
         yield None  # type: ignore[misc]
@@ -2474,9 +2514,13 @@ def _chaos_2(state, ap, li, card):
 # treats this as passive (the card is still playable face-up in matching
 # protocol line; the bypass affordance is a known gap).
 
-@bottom_on_play("MN02:Chaos:4")
-def _chaos_4_bottom(state, ap, li, card):
-    # Discard your hand. Draw that many cards.
+# Chaos 4 bottom — "End: Discard your hand. Draw that many cards."
+# Fires only while uncovered.
+@end_trigger("MN02:Chaos:4")
+def _chaos_4_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     n = len(state.players[ap].hand)
     # Discard from hand index 0 repeatedly until empty (no choice — discard ALL).
     while state.players[ap].hand:
@@ -2800,9 +2844,13 @@ def _courage_0(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@bottom_on_play("MN02:Courage:0")
-def _courage_0_bottom(state, ap, li, card):
-    # You may discard 1 card. If you do, your opponent discards 1 card.
+# Courage 0 bottom — "End: You may discard 1 card. If you do, your
+# opponent discards 1 card." Fires only while uncovered.
+@end_trigger("MN02:Courage:0")
+def _courage_0_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     if not state.players[ap].hand:
         return
     idx = yield Choice(
@@ -2841,9 +2889,13 @@ def _courage_1(state, ap, li, card):
         delete_card_from_field(state, t[0], t[1], t[2])
 
 
-@bottom_on_play("MN02:Courage:2")
-def _courage_2_bottom(state, ap, li, card):
-    # If opp has higher value than you in this line, draw 1.
+# Courage 2 bottom — "End: If your opponent has a higher total value than
+# you do in this line, draw 1 card." Fires only while uncovered.
+@end_trigger("MN02:Courage:2")
+def _courage_2_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     opp = state.opponent(ap)
     if compute_line_value(state, li, opp) > compute_line_value(state, li, ap):
         draw_cards(state, ap, 1)
@@ -2851,9 +2903,14 @@ def _courage_2_bottom(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@bottom_on_play("MN02:Courage:3")
-def _courage_3_bottom(state, ap, li, card):
-    # You may shift this card to the line where opponent has highest value.
+# Courage 3 bottom — "End: You may shift this card to the line where
+# your opponent has their highest total value." Fires only while
+# uncovered.
+@end_trigger("MN02:Courage:3")
+def _courage_3_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     opp = state.opponent(ap)
     best = max(range(NUM_LINES), key=lambda i: compute_line_value(state, i, opp))
     if best == li:
@@ -3204,12 +3261,16 @@ def _luck_4(state, ap, li, card):
 # MN02 — Mirror (Mirror 0 top handled in compute_line_value)
 # ---------------------------------------------------------------------------
 
-@bottom_on_play("MN02:Mirror:1")
-def _mirror_1_bottom(state, ap, li, card):
-    # You may resolve the middle command of 1 of your opponent's cards as
-    # if it were on this card. v1 approximation: choose an opp face-up card
-    # with a middle, then trigger its middle effect with `card` as the
-    # active card. Complex re-entrancy; we delegate to the engine.
+# Mirror 1 bottom — "End: You may resolve the middle command of 1 of
+# your opponent's cards as if it were on this card." Fires only while
+# uncovered.
+@end_trigger("MN02:Mirror:1")
+def _mirror_1_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
+    # v1 approximation: choose an opp face-up card with a middle, then
+    # trigger its middle effect with `card` as the active card.
     opp = state.opponent(ap)
     targets: list[tuple[int, int, int, CardInst]] = []
     for ln in range(NUM_LINES):
@@ -3300,8 +3361,13 @@ def _peace_1(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@bottom_on_play("MN02:Peace:1")
-def _peace_1_bottom(state, ap, li, card):
+# Peace 1 bottom — "End: If your hand is empty, draw 1 card." Fires only
+# while uncovered.
+@end_trigger("MN02:Peace:1")
+def _peace_1_end(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     if not state.players[ap].hand:
         draw_cards(state, ap, 1)
     if False:
@@ -3694,8 +3760,14 @@ def _war_3(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@bottom_on_play("MN02:War:3")
-def _war_3_bottom(state, ap, li, card):
+# War 3 bottom — "After your opponent discards cards: You may play 1
+# card face-down." Fires only while uncovered. `ap` here is the card
+# owner (the broadcast targets the opponent-of-discarder side).
+@after_opp_discard("MN02:War:3")
+def _war_3_after_opp_discard(state, ap, li, card):
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     hand = state.players[ap].hand
     if not hand:
         return
