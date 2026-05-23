@@ -359,6 +359,26 @@ register(MIDDLE_EFFECTS, "AX01:Love:1", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
+// Love 1 bottom — "End: You may give 1 card from your hand to your
+// opponent. If you do, draw 2 cards." Fires only while uncovered.
+register(END_EFFECTS, "AX01:Love:1", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
+  const hand = state.players[ap].hand;
+  if (hand.length === 0) return;
+  const opts = hand.map((_, i) => describeHandCard(state, ap, i));
+  const idx: number = yield {
+    prompt: "Give a card to opponent (optional)? If so pick which",
+    options: opts, targets: hand.map((_, i) => i),
+    optional: true, decider: ap,
+  };
+  if (idx === -1 || idx < 0 || idx >= hand.length) return;
+  const c = state.players[ap].hand.splice(idx, 1)[0];
+  c.owner = (ap === 0 ? 1 : 0) as PlayerIndex;
+  state.players[c.owner].hand.push(c);
+  drawCards(state, ap, 2);
+});
+
 register(MIDDLE_EFFECTS, "AX01:Love:2", function* (state, ap) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   drawCards(state, opp, 1);
@@ -654,6 +674,27 @@ register(MIDDLE_EFFECTS, "MN01:Fire:2", function* (state, ap, li, card) {
   returnCardToHand(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
+// Fire 3 bottom — "End: You may discard 1 card. If you do, flip 1 card."
+// Fires only while uncovered.
+register(END_EFFECTS, "MN01:Fire:3", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
+  if (state.players[ap].hand.length === 0) return;
+  const idx: number = yield {
+    prompt: "(optional) Discard 1 to flip 1 card?",
+    options: ["accept", "skip"], targets: [0, -1],
+    optional: true, decider: ap,
+  };
+  if (idx !== 0) return;
+  yield* discardN(state, ap, 1);
+  const flipTargets = enumerateUncovered(state, { exclude: card, activePlayer: ap });
+  if (flipTargets.length === 0) return;
+  yield* chooseFieldTarget("Flip 1 card", flipTargets, state, ap);
+  const j = state.scratch["_last_target_idx"] as number | undefined;
+  if (j == null || !flipTargets[j]) return;
+  flipCard(state, flipTargets[j].line, flipTargets[j].player, flipTargets[j].pos);
+});
+
 register(MIDDLE_EFFECTS, "MN01:Fire:4", function* (state, ap) {
   // Discard 1 or more. Draw amount discarded plus 1.
   if (state.players[ap].hand.length === 0) {
@@ -937,8 +978,15 @@ function* metal6SelfDelete(state: GameState, _ap: PlayerIndex, _li: number, card
   }
   if (false) yield {} as Choice;
 }
+// Metal 6 top: "When this card would be covered or flipped: First, delete
+// this card." Two trigger paths:
+//   - "Covered" — registered as @when_covered, fires before the
+//     committed card lands on top.
+//   - "Flipped" — preempted directly in flipCard (see helpers.ts). The
+//     post-flip FLIP_TRIGGER broadcast filters on c.faceUp, which would
+//     silently skip face-up→face-down transitions — and the rule
+//     requires deleting BEFORE the flip in any case.
 register(WHEN_COVERED_EFFECTS, "MN01:Metal:6", metal6SelfDelete);
-register(FLIP_TRIGGER_EFFECTS, "MN01:Metal:6", metal6SelfDelete);
 
 // ---------------------------------------------------------------------------
 // PLAGUE (MN01)
@@ -991,6 +1039,52 @@ register(MIDDLE_EFFECTS, "MN01:Plague:3", function* (state, ap, li, card) {
   if (false) yield {} as Choice;
 });
 
+// Plague 4 bottom — "End: Your opponent deletes 1 of their face-down
+// cards. You may flip this card." Fires only while uncovered.
+// Mirrors src/compile_engine/effects.py: the deletion choice is made
+// by the opponent (decider=opp), then the owner may optionally flip
+// Plague 4 face-down.
+register(END_EFFECTS, "MN01:Plague:4", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const targets: FieldTarget[] = [];
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const s = lineStack(state.lines[ln], opp);
+    s.forEach((c, pos) => {
+      if (!c.faceUp) targets.push({ line: ln, player: opp, pos, card: c });
+    });
+  }
+  if (targets.length > 0) {
+    const options = targets.map((t) => describeCard(state, t, ap));
+    const idx: number = yield {
+      prompt: "Opponent deletes one of their face-down cards",
+      options, targets,
+      optional: false, decider: opp,
+    };
+    if (idx >= 0 && idx < targets.length) {
+      const t = targets[idx];
+      deleteCardFromField(state, t.line, t.player, t.pos);
+    }
+  }
+  // Optional self-flip.
+  const flipIdx: number = yield {
+    prompt: "(optional) Flip Plague 4 (this card)?",
+    options: ["flip", "skip"], targets: [0, -1],
+    optional: true, decider: ap,
+  };
+  if (flipIdx !== 0) return;
+  // Re-locate the card in case it moved during the prompt window.
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const s = lineStack(state.lines[ln], ap);
+    const idx = s.indexOf(card);
+    if (idx >= 0) {
+      flipCard(state, ln, ap, idx);
+      return;
+    }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // PSYCHIC (MN01)
 // ---------------------------------------------------------------------------
@@ -1030,6 +1124,29 @@ register(MIDDLE_EFFECTS, "MN01:Psychic:3", function* (state, ap) {
   };
   if (dest[didx] == null) return;
   shiftCard(state, targets[i].line, targets[i].player, targets[i].pos, dest[didx]);
+});
+
+// Psychic 4 bottom — "End: You may return 1 of your opponent's cards.
+// If you do, flip this card." Fires only while uncovered.
+register(END_EFFECTS, "MN01:Psychic:4", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
+  const targets = enumerateUncovered(state, { owner: "opponent", activePlayer: ap });
+  if (targets.length === 0) return;
+  yield* chooseFieldTarget("(optional) Return 1 of opponent's cards to their hand",
+    targets, state, ap, true);
+  const i = state.scratch["_last_target_idx"] as number | undefined;
+  if (i == null || !targets[i]) return;
+  returnCardToHand(state, targets[i].line, targets[i].player, targets[i].pos);
+  // Flip this card.
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const s = lineStack(state.lines[ln], ap);
+    const idx = s.indexOf(card);
+    if (idx >= 0) {
+      flipCard(state, ln, ap, idx);
+      return;
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1169,6 +1286,34 @@ register(MIDDLE_EFFECTS, "MN01:Speed:3", function* (state, ap, li, card) {
   };
   if (dest[didx] == null) return;
   shiftCard(state, targets[i].line, targets[i].player, targets[i].pos, dest[didx]);
+});
+
+// Speed 3 bottom — "End: You may shift 1 of your cards. If you do,
+// flip this card." Fires only while uncovered.
+register(END_EFFECTS, "MN01:Speed:3", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
+  const targets = enumerateShiftTargets(state, { owner: "self", activePlayer: ap });
+  if (targets.length === 0) return;
+  yield* chooseFieldTarget("(optional) Shift 1 of your cards (then flip Speed 3)",
+    targets, state, ap, true);
+  const i = state.scratch["_last_target_idx"] as number | undefined;
+  if (i == null || !targets[i]) return;
+  const dest = [0, 1, 2].filter((l) => l !== targets[i].line);
+  const didx: number = yield {
+    prompt: "To which line?", options: dest.map(String), targets: dest, optional: false, decider: ap,
+  };
+  if (dest[didx] == null) return;
+  shiftCard(state, targets[i].line, targets[i].player, targets[i].pos, dest[didx]);
+  // Flip this card.
+  for (let ln = 0; ln < NUM_LINES; ln++) {
+    const s = lineStack(state.lines[ln], ap);
+    const idx = s.indexOf(card);
+    if (idx >= 0) {
+      flipCard(state, ln, ap, idx);
+      return;
+    }
+  }
 });
 
 register(MIDDLE_EFFECTS, "MN01:Speed:4", function* (state, ap) {

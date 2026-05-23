@@ -246,12 +246,24 @@ def delete_card_from_field(
 def flip_card(state: GameState, line_idx: int, player: int, stack_pos: int) -> CardInst:
     stack = state.lines[line_idx].stack(player)
     c = stack[stack_pos]
-    # Ice 4: "This card cannot be flipped." Persistent immunity while
-    # face-up on the field (covered or uncovered). Logged as a skipped
-    # effect so the UI can show that the flip was blocked.
     d = state.defs[c.def_id]
+    # Ice 4: "This card cannot be flipped." Persistent immunity while
+    # face-up on the field (covered or uncovered).
     if d.key == "MN02:Ice:4" and c.face_up:
         state.log.append(f"Flip on {d.protocol} {d.value} was blocked (immune).")
+        return c
+    # Metal 6 top: "When this card would be covered or flipped: First,
+    # delete this card." The top text is active only while face-up.
+    # Codex p.10 clarification: "When Metal 6 deletes itself as a result
+    # of being flipped, the 'flip' command is used up" — so the caller's
+    # flip is consumed (no alternate target), Metal 6 dies, and the flip
+    # never lands. We handle this preemptively here rather than via the
+    # post-flip FLIP_TRIGGER broadcast because (a) the trigger needs to
+    # fire BEFORE the flip ("First, ...") and (b) the broadcast filters
+    # on `c.face_up` post-flip, which would skip a face-up→face-down
+    # transition entirely.
+    if d.key == "MN01:Metal:6" and c.face_up:
+        delete_card_from_field(state, line_idx, player, stack_pos)
         return c
     was_up = c.face_up
     c.face_up = not c.face_up
@@ -1818,13 +1830,16 @@ def _gravity_2(state, ap, li, card):
     opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
     idx = yield Choice(prompt="Flip 1 card (will then be shifted to this line)",
                        options=opts, targets=targets, decider=ap)
-    sln, spl, spos, _ = targets[idx]
+    sln, spl, spos, target_card = targets[idx]
     flip_card(state, sln, spl, spos)
-    # Card is still on its owner's side; "shift" affects same player's side only,
-    # so we shift on `spl`'s side (the card's side) to line `li`.
+    # If the flipped card disappears from the field (e.g. face-up Metal 6
+    # self-deleting on flip), the shift step can't complete. Codex p.2:
+    # "If you cannot complete the text of a card … the card is still
+    # played." Bail silently in that case.
     if sln != li:
-        cur_pos = state.lines[sln].stack(spl).index(targets[idx][3])
-        shift_card(state, sln, spl, cur_pos, li)
+        src = state.lines[sln].stack(spl)
+        if target_card in src:
+            shift_card(state, sln, spl, src.index(target_card), li)
 
 
 @middle("MN01:Gravity:4")
@@ -2075,11 +2090,14 @@ def _metal_3(state, ap, li, card):
 
 
 # Metal 6 top: "When this card would be covered or flipped: First, delete
-# this card." Two trigger events both call the same delete-self handler.
-# `when_covered` fires when a card is being placed on top; `flip_trigger`
-# fires on any flip transition involving this card (face-up→face-down or
-# face-down→face-up — the rules don't distinguish for the "covered or
-# flipped" emphasis, so we treat both directions as triggering).
+# this card." Top text is active only while face-up. Two trigger paths:
+#   - "Covered" — handled here via `@when_covered`, which fires before
+#     the committed card lands on top.
+#   - "Flipped" — handled preemptively in `flip_card` (see above). We
+#     can't use the post-flip FLIP_TRIGGER broadcast because (a) the
+#     trigger needs to fire BEFORE the flip ("First, ..."), and (b) the
+#     broadcast filters on `c.face_up`, which would silently skip
+#     face-up→face-down transitions.
 def _metal_6_self_delete(state, ap, li, card):
     for ln in range(NUM_LINES):
         for pl in (0, 1):
@@ -2092,7 +2110,6 @@ def _metal_6_self_delete(state, ap, li, card):
 
 
 when_covered("MN01:Metal:6")(_metal_6_self_delete)
-flip_trigger("MN01:Metal:6")(_metal_6_self_delete)
 
 
 # ----- PLAGUE (MN01) ----------------------------------------------------
