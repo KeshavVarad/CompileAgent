@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import type { CardDef } from "@/lib/compile/cards";
 import type { GameView } from "@/lib/view";
 
 /**
@@ -40,6 +41,25 @@ const TITLE_PREFIX: Record<ReportKind, string> = {
   other: "[Report] ",
 };
 
+function buildCardContextMarkdown(card: CardDef | null): string {
+  if (!card) return "";
+  const tier = (label: string, emp: string, text: string) => {
+    if (!emp && !text) return `- **${label}**: —`;
+    const emphPart = emp ? `*${emp}* ` : "";
+    return `- **${label}**: ${emphPart}${text || "—"}`;
+  };
+  return [
+    "### Card",
+    "",
+    `- **Card**: ${card.protocol} ${card.value}`,
+    `- **Key**: \`${card.key}\``,
+    `- **Set**: ${card.setCode}`,
+    tier("Top", card.topEmphasis, card.topText),
+    tier("Middle", card.middleEmphasis, card.middleText),
+    tier("Bottom", card.bottomEmphasis, card.bottomText),
+  ].join("\n");
+}
+
 function buildGameContextMarkdown(view: GameView | null, gameId: string | null): string {
   if (!view || !gameId) return "";
   const last = view.history.length > 0 ? view.history[view.history.length - 1] : null;
@@ -68,15 +88,24 @@ function buildGameContextMarkdown(view: GameView | null, gameId: string | null):
 export function BugReportDialog({
   view = null,
   gameId = null,
+  card = null,
+  triggerLabel,
   triggerClassName,
 }: {
   view?: GameView | null;
   gameId?: string | null;
+  /** When provided, the dialog opens pre-targeted at this card: kind is
+   *  forced to "card-effect", the title is seeded with the card name, and
+   *  a structured card stanza is appended to the body. Used by the card
+   *  browser ([app/cards]) so playtesters can flag a specific card without
+   *  re-typing identity details. */
+  card?: CardDef | null;
+  triggerLabel?: string;
   triggerClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const [kind, setKind] = useState<ReportKind>("card-effect");
-  const [title, setTitle] = useState("");
+  const [kind, setKind] = useState<ReportKind>(card ? "card-effect" : "card-effect");
+  const [title, setTitle] = useState(card ? `${card.protocol} ${card.value} — ` : "");
   const [body, setBody] = useState("");
   const [includeContext, setIncludeContext] = useState(true);
 
@@ -84,11 +113,13 @@ export function BugReportDialog({
   const canSubmit = title.trim().length > 0;
 
   function openIssue() {
-    const ctx = includeContext ? buildGameContextMarkdown(view, gameId) : "";
+    const gameCtx = view && gameId && includeContext ? buildGameContextMarkdown(view, gameId) : "";
+    const cardCtx = card ? buildCardContextMarkdown(card) : "";
     const fullBody = [
       body.trim(),
       "",
-      ctx,
+      cardCtx,
+      gameCtx,
       "",
       "<sub>Filed via the in-app reporter. Game state, if attached above, is",
       "reproducible via the seed + actions log (visit /api/games/&lt;id&gt;).</sub>",
@@ -103,7 +134,9 @@ export function BugReportDialog({
     setOpen(false);
     // Clear so the next open starts blank — the GitHub tab carries the
     // unsubmitted draft, so we don't lose anything by resetting locally.
-    setTitle("");
+    // (For card-prefilled dialogs we re-seed the title on next open via
+    // the useState initializer, which is stable across this single mount.)
+    setTitle(card ? `${card.protocol} ${card.value} — ` : "");
     setBody("");
   }
 
@@ -115,7 +148,7 @@ export function BugReportDialog({
         onClick={() => setOpen(true)}
         className={triggerClassName ?? "text-[11px]"}
       >
-        Report bug / feature
+        {triggerLabel ?? "Report bug / feature"}
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-[560px]">

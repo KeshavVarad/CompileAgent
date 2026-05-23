@@ -33,17 +33,20 @@ export const ALL_SETS = [BASE_SET, EXPANSION_SET, MAIN2_SET, AUX2_SET] as const;
 export type SetCode = (typeof ALL_SETS)[number];
 
 // Errata to apply on top of the upstream JSON at load time. Mirrors the
-// Python `ERRATA` dict in src/compile_engine/cards.py.
-const ERRATA: Record<string, { top?: string; middle?: string; bottom?: string }> = {
+// Python `ERRATA` dict in src/compile_engine/cards.py. Each tier override
+// is a full {emphasis, text} pair so the UI can still surface the trigger
+// label (Start: / End: / When covered:) separately from prose.
+type TierOverride = { emphasis: string; text: string };
+const ERRATA: Record<string, { top?: TierOverride; middle?: TierOverride; bottom?: TierOverride }> = {
   "MN01:Death:1": {
-    top: "Start: You may draw 1 card. If you do, delete 1 other card. Then, delete this card.",
+    top: { emphasis: "Start:", text: "You may draw 1 card. If you do, delete 1 other card. Then, delete this card." },
   },
   "MN01:Fire:0": {
-    bottom: "When this card would be covered: First, draw 1 card. Then, flip 1 other card.",
+    bottom: { emphasis: "When this card would be covered:", text: "First, draw 1 card. Then, flip 1 other card." },
   },
   "MN01:Life:0": {
-    top: "End: If this card is covered, delete this card.",
-    bottom: "",
+    top: { emphasis: "End:", text: "If this card is covered, delete this card." },
+    bottom: { emphasis: "", text: "" },
   },
 };
 
@@ -52,21 +55,25 @@ export type CardDef = {
   setCode: string;
   protocol: Protocol;
   value: number;          // 0..6
+  topEmphasis: string;
   topText: string;
+  middleEmphasis: string;
   middleText: string;
+  bottomEmphasis: string;
   bottomText: string;
   keywords: string[];
   errata: string | null;
   key: string;            // "<set>:<protocol>:<value>"
 };
 
+type RawTier = { emphasis?: string; text?: string };
 type RawCard = {
   set: string;
   protocol: string;
   value: number;
-  top: { text: string };
-  middle: { text: string };
-  bottom: { text: string };
+  top: RawTier;
+  middle: RawTier;
+  bottom: RawTier;
   keywords?: Record<string, boolean>;
   errata?: string;
 };
@@ -87,9 +94,12 @@ export const CARD_DEFS: ReadonlyArray<CardDef> = sorted.map((c, i) => {
     setCode: c.set,
     protocol: c.protocol as Protocol,
     value: c.value,
-    topText: patch?.top ?? c.top.text ?? "",
-    middleText: patch?.middle ?? c.middle.text ?? "",
-    bottomText: patch?.bottom ?? c.bottom.text ?? "",
+    topEmphasis: patch?.top?.emphasis ?? c.top.emphasis ?? "",
+    topText: patch?.top?.text ?? c.top.text ?? "",
+    middleEmphasis: patch?.middle?.emphasis ?? c.middle.emphasis ?? "",
+    middleText: patch?.middle?.text ?? c.middle.text ?? "",
+    bottomEmphasis: patch?.bottom?.emphasis ?? c.bottom.emphasis ?? "",
+    bottomText: patch?.bottom?.text ?? c.bottom.text ?? "",
     keywords: Object.keys(c.keywords || {}),
     errata: patch ? "applied Dec 2024 Codex errata" : (c.errata ?? null),
     key,
@@ -111,8 +121,11 @@ export const PLACEHOLDER_CARD_DEF: CardDef = {
   setCode: "PLACEHOLDER",
   protocol: "Speed" as Protocol,
   value: 0,
+  topEmphasis: "",
   topText: "",
+  middleEmphasis: "",
   middleText: "",
+  bottomEmphasis: "",
   bottomText: "",
   keywords: [],
   errata: null,

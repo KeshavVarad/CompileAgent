@@ -16,8 +16,11 @@ export type CardView = {
   value: number;
   faceUp: boolean;
   isCommitted: boolean;
+  topEmphasis: string;
   topText: string;
+  middleEmphasis: string;
   middleText: string;
+  bottomEmphasis: string;
   bottomText: string;
 };
 
@@ -95,8 +98,11 @@ function viewCard(c: CardInst): CardView {
     value: d.value,
     faceUp: c.faceUp,
     isCommitted: c.isCommitted,
+    topEmphasis: d.topEmphasis,
     topText: d.topText,
+    middleEmphasis: d.middleEmphasis,
     middleText: d.middleText,
+    bottomEmphasis: d.bottomEmphasis,
     bottomText: d.bottomText,
   };
 }
