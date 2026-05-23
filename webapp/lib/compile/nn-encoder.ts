@@ -113,10 +113,15 @@ const PENDING_DEPTH_NORM = 8.0; // matches Python _PENDING_DEPTH_NORM
 
 // Cards whose middle/bottom registers a `when_covered` handler. Hard-coded
 // because pulling in effects.ts here would balloon the bundle. Keep in
-// sync with effects.ts `register(WHEN_COVERED_EFFECTS, …)` callsites.
+// sync with effects.ts `register(WHEN_COVERED_EFFECTS, …)` callsites
+// AND src/compile_engine/effects.py `@when_covered("…")` decorators.
 const WHEN_COVERED_KEYS: ReadonlySet<string> = new Set([
+  "AX01:Apathy:2",
+  "AX01:Hate:4",
   "MN01:Fire:0",
+  "MN01:Life:3",
   "MN01:Metal:6",
+  "MN02:Clarity:1",
 ]);
 
 // Target-meta codes — mirror Python encoder._TGT_*.

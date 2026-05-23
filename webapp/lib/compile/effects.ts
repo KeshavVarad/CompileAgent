@@ -234,8 +234,8 @@ register(MIDDLE_EFFECTS, "AX01:Apathy:1", function* (state, ap, li, card) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_FIRST_EFFECTS, "AX01:Apathy:2", function* (state, ap, li, card) {
-  // First, flip this card. (Self-flip.)
+// Apathy 2 bottom — "When this card would be covered: First, flip this card."
+register(WHEN_COVERED_EFFECTS, "AX01:Apathy:2", function* (_state, _ap, _li, card) {
   card.faceUp = !card.faceUp;
   if (false) yield {} as Choice;
 });
@@ -322,8 +322,9 @@ register(AFTER_SELF_DELETE_EFFECTS, "AX01:Hate:3", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_FIRST_EFFECTS, "AX01:Hate:4", function* (state, ap, li) {
-  // First, delete the lowest-value covered card in this line.
+// Hate 4 bottom — "When this card would be covered: First, delete the
+// lowest-value covered card in this line."
+register(WHEN_COVERED_EFFECTS, "AX01:Hate:4", function* (state, ap, li) {
   const targets: FieldTarget[] = [];
   for (const pl of [0, 1] as PlayerIndex[]) {
     const stack = lineStack(state.lines[li], pl);
@@ -842,7 +843,10 @@ register(MIDDLE_EFFECTS, "MN01:Life:2", function* (state, ap) {
   flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_FIRST_EFFECTS, "MN01:Life:3", function* (state, ap, li) {
+// Life 3 bottom — "When this card would be covered: First, play the
+// top card of your deck face-down in another line." Was firing on
+// play; playtester report fixed.
+register(WHEN_COVERED_EFFECTS, "MN01:Life:3", function* (state, ap, li) {
   const otherLines = [0, 1, 2].filter((l) => l !== li);
   if (otherLines.length === 0) return;
   const idx: number = yield {
@@ -1615,7 +1619,8 @@ register(MIDDLE_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_FIRST_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
+// Clarity 1 bottom — "When this card would be covered: First, draw 3 cards."
+register(WHEN_COVERED_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
   drawCards(state, ap, 3);
   if (false) yield {} as Choice;
 });

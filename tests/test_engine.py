@@ -2247,3 +2247,54 @@ def test_ice_3_end_trigger_fires_when_covered():
     choice = pending[-1].last_choice
     assert choice is not None
     assert "Shift covered Ice 3" in choice.prompt or "shift" in choice.prompt.lower()
+
+
+def test_life_3_fires_on_cover_not_on_play():
+    """Life 3 bottom: 'When this card would be covered: First, play the
+    top card of your deck face-down in another line.' Was registered as
+    @bottom_first (fired on play) — playtester reported. Verify:
+      1. Playing Life 3 face-up does NOT immediately trigger the bottom.
+      2. Covering Life 3 with any card DOES fire the bottom.
+    """
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import _life_3_when_covered, play_top_deck_face_down
+    g = Game(GameConfig(seed=400))
+    g.set_predetermined_draft([["Life", "Light", "Fire"], ["Death", "Water", "Speed"]])
+    defs = load_card_defs()
+    life_3 = next(d for d in defs if d.key == "MN01:Life:3")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    l3 = CardInst(inst_id=40001, def_id=life_3.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [l3]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    # Stock the deck with predictable cards so we can detect the face-down play.
+    g.state.players[0].deck = [
+        CardInst(inst_id=40100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(3)
+    ]
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    # Snapshot stack counts before the cover.
+    pre_l1_stack = sum(len(g.state.lines[i].stack(0)) for i in (1, 2))
+    pre_deck = len(g.state.players[0].deck)
+    # Fire the when_covered handler directly (simulating the cover trigger).
+    g._push_effect(_life_3_when_covered(g.state, 0, 0, l3))
+    g._drive()
+    # Resolve the line-pick choice with the first option (line 1).
+    if g._pending:
+        g.step(g.legal_actions()[0])
+    post_l1_stack = sum(len(g.state.lines[i].stack(0)) for i in (1, 2))
+    post_deck = len(g.state.players[0].deck)
+    assert post_l1_stack == pre_l1_stack + 1, (
+        f"Life 3 when_covered should play 1 face-down card in another line; "
+        f"L1+L2 stacks: {pre_l1_stack} → {post_l1_stack}"
+    )
+    assert post_deck == pre_deck - 1, (
+        f"deck size should drop by 1 (face-down play consumes top); "
+        f"deck: {pre_deck} → {post_deck}"
+    )

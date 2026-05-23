@@ -1227,9 +1227,11 @@ def _apathy_1(state, ap, li, card):
         yield  # pragma: no cover
 
 
-# Apathy 2: top-only ("ignore middles"). Bottom "First, flip this card" handled below.
-@bottom_first("AX01:Apathy:2")
-def _apathy_2_first(state, ap, li, card):
+# Apathy 2 bottom — "When this card would be covered: First, flip this
+# card." Fires the moment something is about to be played on top of
+# Apathy 2 (the cover lands after this resolves).
+@when_covered("AX01:Apathy:2")
+def _apathy_2_when_covered(state, ap, li, card):
     # Flip itself immediately.
     for pl in (0, 1):
         s = state.lines[li].stack(pl)
@@ -1343,9 +1345,10 @@ def _hate_3_top(state, ap, li, card):
         yield  # pragma: no cover
 
 
-# Hate 4: bottom-first "delete lowest value covered card in this line"
-@bottom_first("AX01:Hate:4")
-def _hate_4_first(state, ap, li, card):
+# Hate 4 bottom — "When this card would be covered: First, delete the
+# lowest-value covered card in this line." Fires on cover, not on play.
+@when_covered("AX01:Hate:4")
+def _hate_4_when_covered(state, ap, li, card):
     # Lowest value covered card across both sides of this line.
     targets = []
     for pl in (0, 1):
@@ -1962,8 +1965,12 @@ def _life_2(state, ap, li, card):
     flip_card(state, sln, spl, spos)
 
 
-@bottom_first("MN01:Life:3")
-def _life_3_first(state, ap, li, card):
+# Life 3 bottom — "When this card would be covered: First, play the
+# top card of your deck face-down in another line." Was registered as
+# bottom_first (fires on play) which was wrong — playtester reported
+# the wrong timing.
+@when_covered("MN01:Life:3")
+def _life_3_when_covered(state, ap, li, card):
     # First, play the top card of your deck face-down in another line.
     other_lines = [i for i in range(NUM_LINES) if i != li]
     opts = [str(i) for i in other_lines]
@@ -2840,8 +2847,10 @@ def _clarity_1(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@bottom_first("MN02:Clarity:1")
-def _clarity_1_first(state, ap, li, card):
+# Clarity 1 bottom — "When this card would be covered: First, draw 3
+# cards." Fires on cover, not on play.
+@when_covered("MN02:Clarity:1")
+def _clarity_1_when_covered(state, ap, li, card):
     draw_cards(state, ap, 3)
     if False:
         yield None  # type: ignore[misc]
@@ -3000,6 +3009,15 @@ def _corruption_1(state, ap, li, card):
     return_card_to_hand(state, t[0], t[1], t[2])
 
 
+# TODO: Corruption 1 bottom emphasis is "When a card would be returned
+# to your opponent's hand: …". That's a *global* event trigger (any
+# return), not a self-state trigger. The engine doesn't have a
+# `@when_would_be_returned` decorator and `return_card_to_hand` doesn't
+# broadcast a triggerable event. Current registration as
+# @bottom_on_play (fires on Corruption 1's own play) is a heuristic
+# stand-in that only correctly handles the case where Corruption 1's
+# middle returned a card — global returns from other cards' effects
+# aren't intercepted. Needs an engine-level trigger hook to fix.
 @bottom_on_play("MN02:Corruption:1")
 def _corruption_1_bottom(state, ap, li, card):
     # Bottom modifies the return: "Put that card on top of their deck face-down instead."
@@ -4285,6 +4303,14 @@ def _unity_0(state, ap, li, card):
         flip_card(state, t[0], t[1], t[2])
 
 
+# TODO: Unity 0 bottom — "When this card would be flipped by a Unity
+# card: First, flip 1 card or draw 1 card." This handler is registered
+# as @bottom_first (fires on play) which is wrong: the rule says fire
+# when flipped, AND only when the flipper is a Unity card. Fixing
+# requires either (a) the engine to expose the flip source to the
+# trigger, or (b) approximating with @flip_trigger and dropping the
+# "by a Unity card" condition (over-triggers slightly). Left as-is
+# for now to avoid changing observed behavior without a clean fix.
 @bottom_first("AX02:Unity:0")
 def _unity_0_first(state, ap, li, card):
     # First: flip one card or draw 1 card.
