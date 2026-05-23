@@ -277,6 +277,24 @@ def flip_card(state: GameState, line_idx: int, player: int, stack_pos: int) -> C
     return c
 
 
+def source_still_active(state: GameState, card: CardInst) -> bool:
+    """Return True iff `card` is on the field, face-up, and the uncovered top
+    of its stack. The Compile Codex (see Hate 2 clarification on p.12 and
+    Mirror 3 clarification on p.13) is explicit: a card's text stops
+    resolving the moment the source card leaves play — whether by being
+    deleted, flipped face-down, or covered. Use this between clauses of
+    any multi-clause middle whose earlier clause could plausibly remove
+    the source (self-target OR a downstream cascade)."""
+    if not card.face_up:
+        return False
+    for ln in state.lines:
+        for pl in (0, 1):
+            stack = ln.stack(pl)
+            if stack and stack[-1] is card:
+                return True
+    return False
+
+
 def uncommit_sentinel(c: CardInst):
     """Generator that clears `c.is_committed` and immediately completes.
     Used as a fence on the engine's pending stack between when_covered
@@ -1290,7 +1308,12 @@ def _hate_1(state, ap, li, card):
 @middle("AX01:Hate:2")
 def _hate_2(state, ap, li, card):
     # Delete your highest value uncovered card. Delete opp's highest value uncovered card.
+    # Codex p.12 clarification: if Hate 2 itself is your highest value
+    # uncovered card, the first clause deletes it and the second clause
+    # "no longer exists and does not trigger."
     for who in (ap, 1 - ap):
+        if not source_still_active(state, card):
+            return
         targets = _enumerate_uncovered(state, owner="self" if who == ap else "opponent",
                                        active_player=ap)
         if not targets:
@@ -1489,6 +1512,11 @@ def _darkness_1(state, ap, li, card):
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
     flip_card(state, sln, spl, spos)
+    # Codex: if the source card leaves play during the first clause (e.g.
+    # the opp's flipped card cascades into deleting Darkness 1), the rest
+    # of the effect stops.
+    if not source_still_active(state, card):
+        return
     # Optional shift that same card.
     cur_pos = len(state.lines[sln].stack(spl)) - 1  # it's still uncovered (top)
     if state.lines[sln].stack(spl) and state.lines[sln].stack(spl)[-1] is targets[idx][3]:
@@ -1832,10 +1860,17 @@ def _gravity_2(state, ap, li, card):
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, target_card = targets[idx]
     flip_card(state, sln, spl, spos)
-    # If the flipped card disappears from the field (e.g. face-up Metal 6
-    # self-deleting on flip), the shift step can't complete. Codex p.2:
-    # "If you cannot complete the text of a card … the card is still
-    # played." Bail silently in that case.
+    # Two source-removal cases:
+    #   1. The flipped card disappears from the field (e.g. face-up Metal
+    #      6 self-deleting on flip), so the shift step can't complete.
+    #      Codex p.2: "If you cannot complete the text of a card … the
+    #      card is still played." Bail silently.
+    #   2. Gravity 2 itself leaves play via cascade (rare — flipping the
+    #      target triggers downstream effects that delete/flip/cover
+    #      Gravity 2). Codex (Hate 2 / Mirror 3 clarifications): the
+    #      remainder of the effect stops.
+    if not source_still_active(state, card):
+        return
     if sln != li:
         src = state.lines[sln].stack(spl)
         if target_card in src:
@@ -1961,6 +1996,11 @@ def _light_0(state, ap, li, card):
                        options=opts, targets=targets, decider=ap)
     sln, spl, spos, _ = targets[idx]
     flipped = flip_card(state, sln, spl, spos)
+    # Codex: if Light 0 itself leaves play (e.g. flipping a Hate 1
+    # face-up triggers Hate 1's middle, which the opponent uses to
+    # delete Light 0), the draw clause stops.
+    if not source_still_active(state, card):
+        return
     if flipped.face_up:
         draw_cards(state, ap, state.defs[flipped.def_id].value)
     else:
@@ -3778,6 +3818,11 @@ def _smoke_1(state, ap, li, card):
         return
     t = targets[idx]
     flip_card(state, t[0], t[1], t[2])
+    # Codex: if Smoke 1 itself leaves play during the flip cascade, the
+    # optional shift stops. (exclude=card prevents direct self-flip, but
+    # a downstream when_covered/flip-trigger could still remove Smoke 1.)
+    if not source_still_active(state, card):
+        return
     dest = [i for i in range(NUM_LINES) if i != t[0]]
     didx = yield Choice(
         prompt="(optional) Shift it to which line?",
@@ -3786,8 +3831,12 @@ def _smoke_1(state, ap, li, card):
     )
     if didx == -1 or didx >= len(dest):
         return
-    # Look up the card's new position after flip.
-    new_pos = state.lines[t[0]].stack(t[1]).index(t[3])
+    # The flipped card itself may have been removed by the flip cascade
+    # (e.g. it became uncovered, fired when_covered logic, got deleted).
+    src = state.lines[t[0]].stack(t[1])
+    if t[3] not in src:
+        return
+    new_pos = src.index(t[3])
     shift_card(state, t[0], t[1], new_pos, dest[didx])
 
 

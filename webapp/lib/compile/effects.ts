@@ -32,6 +32,7 @@ import {
   refreshPlayer,
   returnCardToHand,
   shiftCard,
+  sourceStillActive,
 } from "./helpers";
 import type { CardInst, Choice, GameState, PlayerIndex } from "./types";
 import { FACE_DOWN_BASE_VALUE, NUM_LINES } from "./types";
@@ -287,9 +288,13 @@ register(MIDDLE_EFFECTS, "AX01:Hate:1", function* (state, ap, li, card) {
   }
 });
 
-register(MIDDLE_EFFECTS, "AX01:Hate:2", function* (state, ap) {
-  // Delete your highest value uncovered card. Delete opponent's highest value uncovered card.
+register(MIDDLE_EFFECTS, "AX01:Hate:2", function* (state, ap, _li, card) {
+  // Delete your highest value uncovered card. Delete opponent's highest
+  // value uncovered card. Codex p.12 clarification: if Hate 2 itself is
+  // your highest value uncovered card, the first clause deletes it and
+  // the second clause "no longer exists and does not trigger."
   for (const who of [ap, (1 - ap) as PlayerIndex]) {
+    if (!sourceStillActive(state, card)) return;
     const targets = enumerateUncovered(state, {
       owner: who === ap ? "self" : "opponent",
       activePlayer: ap,
@@ -430,7 +435,7 @@ register(MIDDLE_EFFECTS, "MN01:Darkness:0", function* (state, ap) {
   shiftCard(state, src.line, src.player, src.pos, destLines[dstIdx]);
 });
 
-register(MIDDLE_EFFECTS, "MN01:Darkness:1", function* (state, ap) {
+register(MIDDLE_EFFECTS, "MN01:Darkness:1", function* (state, ap, _li, card) {
   // "Flip 1 of your opponent's cards. You may shift that card."
   const targets = enumerateUncovered(state, { owner: "opponent", activePlayer: ap });
   yield* chooseFieldTarget("Flip 1 of opponent's cards", targets, state, ap);
@@ -438,6 +443,9 @@ register(MIDDLE_EFFECTS, "MN01:Darkness:1", function* (state, ap) {
   if (i == null || !targets[i]) return;
   const tgt = targets[i];
   flipCard(state, tgt.line, tgt.player, tgt.pos);
+  // Codex: if Darkness 1 itself leaves play in the flip cascade, the
+  // remaining "you may shift that card" stops.
+  if (!sourceStillActive(state, card)) return;
   // The "that card" reference survives mid-effect even if the flip moved
   // / deleted the card (Codex p.3 "Selecting and Targeting"). Re-locate
   // the flipped card by identity; if it's no longer on the field (e.g.
@@ -757,6 +765,10 @@ register(MIDDLE_EFFECTS, "MN01:Gravity:2", function* (state, ap, li, card) {
   if (i == null || !targets[i]) return;
   const t = targets[i];
   flipCard(state, t.line, t.player, t.pos);
+  // Codex: if Gravity 2 itself leaves play during the flip cascade, the
+  // shift clause stops. (exclude=card kept it from being a direct flip
+  // target, but a downstream trigger could still remove it.)
+  if (!sourceStillActive(state, card)) return;
   if (t.line !== li) {
     const newPos = lineStack(state.lines[t.line], t.player).indexOf(t.card);
     if (newPos >= 0) shiftCard(state, t.line, t.player, newPos, li);
@@ -860,6 +872,9 @@ register(MIDDLE_EFFECTS, "MN01:Light:0", function* (state, ap, li, card) {
   const i = state.scratch["_last_target_idx"] as number | undefined;
   if (i == null || !targets[i]) return;
   const flipped = flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
+  // Codex: if Light 0 itself leaves play in the flip cascade (e.g. the
+  // flipped card's middle deletes Light 0), the draw clause stops.
+  if (!sourceStillActive(state, card)) return;
   const v = flipped.faceUp ? CARD_DEFS[flipped.defId].value : FACE_DOWN_BASE_VALUE;
   drawCards(state, ap, v);
 });
@@ -2374,6 +2389,9 @@ register(MIDDLE_EFFECTS, "MN02:Smoke:1", function* (state, ap, li, card) {
   if (i == null || !targets[i]) return;
   const t = targets[i];
   flipCard(state, t.line, t.player, t.pos);
+  // Codex: if Smoke 1 itself leaves play during the flip cascade, the
+  // optional shift stops.
+  if (!sourceStillActive(state, card)) return;
   const dest = [0, 1, 2].filter((l) => l !== t.line);
   const didx: number = yield {
     prompt: "(optional) Shift", options: dest.map(String).concat(["skip"]),
