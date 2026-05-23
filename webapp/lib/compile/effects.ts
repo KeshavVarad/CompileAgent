@@ -1854,6 +1854,12 @@ register(MIDDLE_EFFECTS, "MN02:Courage:1", function* (state, ap) {
   if (i != null && targets[i]) deleteCardFromField(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
+// Courage 2 middle — "Draw 1 card."
+register(MIDDLE_EFFECTS, "MN02:Courage:2", function* (state, ap) {
+  drawCards(state, ap, 1);
+  if (false) yield {} as Choice;
+});
+
 // Courage 2 bottom — "End: If opp has higher total value in this line,
 // draw 1 card." Fires only while uncovered.
 register(END_EFFECTS, "MN02:Courage:2", function* (state, ap, li, card) {
@@ -1945,7 +1951,7 @@ register(MIDDLE_EFFECTS, "MN02:Fear:2", function* (state, ap) {
   if (i != null && targets[i]) returnCardToHand(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Fear:3", function* (state, ap, li) {
+register(MIDDLE_EFFECTS, "MN02:Fear:3", function* (state, ap, li) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const s = lineStack(state.lines[li], opp);
   const targets: FieldTarget[] = [];
@@ -1975,7 +1981,7 @@ register(MIDDLE_EFFECTS, "MN02:Fear:4", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Fear:5", function* (state, ap) {
+register(MIDDLE_EFFECTS, "MN02:Fear:5", function* (state, ap) {
   yield* discardN(state, ap, 1);
 });
 
@@ -2018,19 +2024,31 @@ register(MIDDLE_EFFECTS, "MN02:Ice:2", function* (state, ap, li, card) {
   if (dest[didx] != null) shiftCard(state, targets[i].line, targets[i].player, targets[i].pos, dest[didx]);
 });
 
-register(MIDDLE_EFFECTS, "MN02:Ice:3", function* (state, ap, li, card) {
-  const s = lineStack(state.lines[li], card.owner);
-  const pos = s.indexOf(card);
-  if (pos < 0 || pos === s.length - 1) return; // not covered
-  const dest = [0, 1, 2].filter((l) => l !== li);
+// Ice 3 top — "End: If this card is covered, you may shift it." Top-tier
+// text is active while face-up regardless of cover; the condition itself
+// requires the card to be covered.
+register(END_EFFECTS, "MN02:Ice:3", function* (state, ap, _li, card) {
+  if (!card.faceUp) return;
+  // Re-locate Ice 3 in case it was shifted since play.
+  let curLine = -1;
+  let curPos = -1;
+  for (let ln = 0; ln < 3; ln++) {
+    const s = lineStack(state.lines[ln], card.owner);
+    const p = s.indexOf(card);
+    if (p >= 0) { curLine = ln; curPos = p; break; }
+  }
+  if (curLine < 0) return;
+  const s = lineStack(state.lines[curLine], card.owner);
+  if (curPos === s.length - 1) return; // not covered
+  const dest = [0, 1, 2].filter((l) => l !== curLine);
   if (dest.length === 0) return;
   const idx: number = yield {
-    prompt: "(optional) Shift Ice 3 (covered)",
+    prompt: "(optional) Shift covered Ice 3 to another line",
     options: dest.map(String).concat(["skip"]),
     targets: [...dest, -1], optional: true, decider: ap,
   };
   if (idx === -1 || idx >= dest.length) return;
-  shiftCard(state, li, card.owner, pos, dest[idx]);
+  shiftCard(state, curLine, card.owner, curPos, dest[idx]);
 });
 
 // ----- MN02: Luck ----------------------------------------------------------
@@ -2738,10 +2756,11 @@ register(MIDDLE_EFFECTS, "AX02:Assimilation:4", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-// Assimilation 6 bottom: "Play the top card of your deck face down on
-// your opponent's side of the field." Player picks the opponent line.
-// Mirrors src/compile_engine/effects.py.
-register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Assimilation:6", function* (state, ap) {
+// Assimilation 6 bottom — "End: Play the top card of your deck face-down
+// on your opponent's side." Bottom-tier End: fires only while uncovered.
+register(END_EFFECTS, "AX02:Assimilation:6", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   const ps = state.players[ap];
   if (ps.deck.length === 0) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
@@ -2779,11 +2798,13 @@ register(MIDDLE_EFFECTS, "AX02:Diversity:0", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-// Diversity 0 bottom: "End step: you may play one non-Diversity card
-// in this line." Stubbed as a no-op — would need a new ACTION variant
-// to model the off-turn play affordance. Regular plays cover the common
-// case.
-register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Diversity:0", function* () {
+// Diversity 0 bottom — "End: You may play one non-Diversity card in
+// this line." Stubbed as a no-op — would need a new ACTION variant to
+// model the off-turn play affordance. Regular plays cover the common
+// case. Bottom-tier End: fires only while uncovered.
+register(END_EFFECTS, "AX02:Diversity:0", function* (state, ap, li, card) {
+  const stack = lineStack(state.lines[li], ap);
+  if (stack.length === 0 || stack[stack.length - 1] !== card) return;
   if (false) yield {} as Choice;
 });
 
@@ -2839,10 +2860,12 @@ register(BOTTOM_FIRST_EFFECTS, "AX02:Unity:0", function* (state, ap, li, card) {
 });
 
 register(MIDDLE_EFFECTS, "AX02:Unity:3", function* (state, ap, li, card) {
+  // "If there is another Unity card in the field, you may flip 1
+  // face-up card." Face-up filter mirrors the card text.
   if (countUnityInField(state) <= 1) return;
-  const targets = enumerateUncovered(state, { exclude: card, activePlayer: ap });
+  const targets = enumerateUncovered(state, { exclude: card, face: "up", activePlayer: ap });
   if (targets.length === 0) return;
-  yield* chooseFieldTarget("(optional) Flip 1 card", targets, state, ap, true);
+  yield* chooseFieldTarget("(optional) Flip 1 face-up card", targets, state, ap, true);
   const i = state.scratch["_last_target_idx"] as number | undefined;
   if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
@@ -2904,8 +2927,11 @@ register(MIDDLE_EFFECTS, "AX02:Assimilation:0", function* (state, ap) {
   checkDiversity6SelfDestruct(state);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Assimilation:2", function* (state, ap, li) {
-  // B: Play the top card of your opponent's deck face down in this stack.
+register(END_EFFECTS, "AX02:Assimilation:2", function* (state, ap, li, card) {
+  // Bottom-tier End: — "Play the top card of your opponent's deck
+  // face-down in YOUR stack in this line." Fires only while uncovered.
+  const guardStack = lineStack(state.lines[li], ap);
+  if (guardStack.length === 0 || guardStack[guardStack.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const psOpp = state.players[opp];
   if (psOpp.deck.length === 0 && psOpp.trash.length > 0) {
@@ -2963,6 +2989,31 @@ register(MIDDLE_EFFECTS, "AX02:Diversity:4", function* (state, ap, li, card) {
   if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
+// Unity 1 top — "Start: If this card is covered, you may shift this
+// card." Top-tier text is active while face-up regardless of cover.
+register(START_EFFECTS, "AX02:Unity:1", function* (state, ap, _li, card) {
+  if (!card.faceUp) return;
+  let curLine = -1;
+  let curPos = -1;
+  for (let ln = 0; ln < 3; ln++) {
+    const s = lineStack(state.lines[ln], card.owner);
+    const p = s.indexOf(card);
+    if (p >= 0) { curLine = ln; curPos = p; break; }
+  }
+  if (curLine < 0) return;
+  const s = lineStack(state.lines[curLine], card.owner);
+  if (curPos === s.length - 1) return; // not covered
+  const dest = [0, 1, 2].filter((l) => l !== curLine);
+  if (dest.length === 0) return;
+  const idx: number = yield {
+    prompt: "(optional) Shift covered Unity 1 to another line",
+    options: dest.map(String).concat(["skip"]),
+    targets: [...dest, -1], optional: true, decider: ap,
+  };
+  if (idx === -1 || idx >= dest.length) return;
+  shiftCard(state, curLine, card.owner, curPos, dest[idx]);
+});
+
 register(MIDDLE_EFFECTS, "AX02:Unity:1", function* (state, ap) {
   // M: If there are 5 or more Unity cards in the field, flip the Unity
   // protocol to the compiled side and delete all cards in that line.
@@ -2991,9 +3042,11 @@ register(MIDDLE_EFFECTS, "AX02:Unity:2", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "AX02:Unity:4", function* (state, ap) {
-  // B: If your hand is empty, reveal your deck, draw all Unity cards
-  // from it, then shuffle your deck.
+// Unity 4 top — "End: If your hand is empty, reveal your deck, draw
+// all Unity cards from it, then shuffle your deck." Top-tier End:
+// fires while face-up regardless of cover.
+register(END_EFFECTS, "AX02:Unity:4", function* (state, ap, _li, card) {
+  if (!card.faceUp) return;
   if (state.players[ap].hand.length > 0) return;
   const ps = state.players[ap];
   const unityCards = ps.deck.filter((c) => CARD_DEFS[c.defId].protocol === "Unity");

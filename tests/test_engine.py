@@ -2130,3 +2130,120 @@ def test_hate_2_second_clause_fires_when_source_survives():
     assert opp_card not in g.state.lines[2].p1_stack, (
         "second clause should fire since Hate 2 is still active"
     )
+
+
+def test_courage_2_middle_draws_one():
+    """Courage 2 was missing its middle 'Draw 1 card.' effect. Verify
+    that playing Courage 2 face-up fires the new middle and draws one."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import _courage_2_middle
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=300, include_main2=True))
+    g.set_predetermined_draft([["Courage", "Light", "Fire"], ["Death", "Water", "Speed"]])
+    defs = load_card_defs()
+    courage_2 = next(d for d in defs if d.key == "MN02:Courage:2")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    c2 = CardInst(inst_id=30001, def_id=courage_2.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [c2]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=30100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(3)
+    ]
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    pre_hand = len(g.state.players[0].hand)
+    g._push_effect(_courage_2_middle(g.state, 0, 0, c2))
+    g._drive()
+    assert len(g.state.players[0].hand) == pre_hand + 1, (
+        f"Courage 2 middle should draw 1; hand went {pre_hand} → "
+        f"{len(g.state.players[0].hand)}"
+    )
+
+
+def test_unity_3_does_not_flip_face_down_cards():
+    """Unity 3 middle was previously enumerating all uncovered cards; per
+    the card text it should only target face-up cards. Verify that with
+    a face-down card present, it isn't a legal flip target."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import _unity_3
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=301, include_main2=True, include_aux2=True))
+    g.set_predetermined_draft([
+        ["Unity", "Light", "Fire"],
+        ["Assimilation", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    unity_3 = next(d for d in defs if d.key == "AX02:Unity:3")
+    unity_2 = next(d for d in defs if d.key == "AX02:Unity:2")  # second Unity for the precondition
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    u3 = CardInst(inst_id=30201, def_id=unity_3.def_id, owner=0, face_up=True)
+    u2 = CardInst(inst_id=30202, def_id=unity_2.def_id, owner=0, face_up=True)
+    fd = CardInst(inst_id=30203, def_id=light_1.def_id, owner=1, face_up=False)
+    g.state.lines[0].p0_stack = [u3]
+    g.state.lines[1].p0_stack = [u2]
+    g.state.lines[2].p1_stack = [fd]  # opp's face-down — should NOT be a target
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    g._push_effect(_unity_3(g.state, 0, 0, u3))
+    # _drive stops at a pending Choice; inspect what targets were offered.
+    g._drive()
+    pending = g._pending
+    # The Choice should NOT include the face-down opp card.
+    if pending:
+        choice = pending[-1].last_choice
+        assert choice is not None
+        for t in choice.targets:
+            if isinstance(t, tuple) and len(t) >= 4:
+                card = t[3]
+                assert card.face_up, (
+                    f"Unity 3 should not offer face-down cards as flip targets; "
+                    f"got {card}"
+                )
+
+
+def test_ice_3_end_trigger_fires_when_covered():
+    """Ice 3 was previously a middle effect ('on play/flip/uncover, if
+    covered, shift'). Per the corrected card text it's now Top with End:
+    emphasis — fires at end of turn while face-up if covered. Verify the
+    end-trigger fires and offers the shift."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import _ice_3_end
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=302, include_main2=True))
+    g.set_predetermined_draft([["Ice", "Light", "Fire"], ["Death", "Water", "Speed"]])
+    defs = load_card_defs()
+    ice_3 = next(d for d in defs if d.key == "MN02:Ice:3")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    i3 = CardInst(inst_id=30301, def_id=ice_3.def_id, owner=0, face_up=True)
+    cover = CardInst(inst_id=30302, def_id=light_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [i3, cover]  # Ice 3 is covered by Light 1
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    g._push_effect(_ice_3_end(g.state, 0, 0, i3))
+    g._drive()
+    # End trigger should prompt for an optional shift since Ice 3 is covered.
+    pending = g._pending
+    assert pending, "Ice 3 end-trigger should yield a shift choice while covered"
+    choice = pending[-1].last_choice
+    assert choice is not None
+    assert "Shift covered Ice 3" in choice.prompt or "shift" in choice.prompt.lower()

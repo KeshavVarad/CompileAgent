@@ -155,7 +155,7 @@
         },
         "bottom": {
             "emphasis": "After a player refreshes:",
-            "text": "Draw the top card of your opponent\u00b4s deck. Discard 1 card into their trash."
+            "text": "Draw the top card of your opponent´s deck. Discard 1 card into their trash."
         },
         "keywords": {
             "discard": true,
@@ -176,8 +176,8 @@
             "text": ""
         },
         "bottom": {
-            "emphasis": "",
-            "text": "Play the top card of your opponent's deck face down in this stack."
+            "emphasis": "End:",
+            "text": "Play the top card of your opponent's deck face-down in your stack in this line."
         },
         "keywords": {},
         "set": "AX02"
@@ -194,7 +194,7 @@
             "text": ""
         },
         "bottom": {
-            "emphasis": "",
+            "emphasis": "End:",
             "text": "Play the top card of your deck face down on your opponent's side of the field."
         },
         "keywords": {
@@ -212,7 +212,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "Draw the top card of your opponent\u00b4s deck. Your opponent draws the top card of your deck."
+            "text": "Draw the top card of your opponent´s deck. Your opponent draws the top card of your deck."
         },
         "bottom": {
             "emphasis": "",
@@ -256,7 +256,7 @@
         },
         "bottom": {
             "emphasis": "Start:",
-            "text": "Draw the top card of your opponent\u00b4s deck. Your opponent draws the top card of your deck."
+            "text": "Draw the top card of your opponent´s deck. Your opponent draws the top card of your deck."
         },
         "keywords": {
             "line": true,
@@ -274,7 +274,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "Rearrange your protocols. Rearrange your opponent\u00b4s protocols."
+            "text": "Rearrange your protocols. Rearrange your opponent´s protocols."
         },
         "bottom": {
             "emphasis": "",
@@ -503,7 +503,7 @@
         },
         "bottom": {
             "emphasis": "",
-            "text": "You may play this card in any line on either player\u00b4s side."
+            "text": "You may play this card in any line on either player´s side."
         },
         "keywords": {
             "flip": true,
@@ -523,7 +523,7 @@
             "text": "Return 1 card."
         },
         "bottom": {
-            "emphasis": "When a card would be returned to your opponent\u00b4s hand:",
+            "emphasis": "When a card would be returned to your opponent´s hand:",
             "text": "Put that card on top of their deck face-down instead."
         },
         "keywords": {
@@ -643,7 +643,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "Delete 1 of your opponent\u00b4s cards in a line where they have a highter total value than you do"
+            "text": "Delete 1 of your opponent´s cards in a line where they have a highter total value than you do"
         },
         "bottom": {
             "emphasis": "",
@@ -663,7 +663,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": ""
+            "text": "Draw 1 card."
         },
         "bottom": {
             "emphasis": "End:",
@@ -1021,7 +1021,7 @@
             "text": "If there are 6 different protocols on face-up cards in the field, flip the Diversity protocol card directly to its compiled side."
         },
         "bottom": {
-            "emphasis": "",
+            "emphasis": "End:",
             "text": "You may play one non-Diversity card in this line."
         },
         "keywords": {
@@ -1111,7 +1111,7 @@
         "value": 0,
         "top": {
             "emphasis": "",
-            "text": "During your turn, your opponent\u00b4s cards do not have middle commands."
+            "text": "During your turn, your opponent´s cards do not have middle commands."
         },
         "middle": {
             "emphasis": "",
@@ -1158,7 +1158,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "Return 1 of your opponent\u00b4s cards."
+            "text": "Return 1 of your opponent´s cards."
         },
         "bottom": {
             "emphasis": "",
@@ -1178,11 +1178,11 @@
         },
         "middle": {
             "emphasis": "",
-            "text": ""
+            "text": "Shift 1 of your opponent´s covered or uncovered cards in this line."
         },
         "bottom": {
             "emphasis": "",
-            "text": "Shift 1 of your opponent\u00b4s covered or uncovered cards in this line."
+            "text": ""
         },
         "keywords": {
             "shift": true,
@@ -1220,11 +1220,11 @@
         },
         "middle": {
             "emphasis": "",
-            "text": ""
+            "text": "You discard a card."
         },
         "bottom": {
             "emphasis": "",
-            "text": "You discard a card."
+            "text": ""
         },
         "keywords": {
             "discard": true
@@ -1677,12 +1677,12 @@
         "protocol": "Ice",
         "value": 3,
         "top": {
-            "emphasis": "",
-            "text": ""
+            "emphasis": "End:",
+            "text": "If this card is covered, you may shift it."
         },
         "middle": {
             "emphasis": "",
-            "text": "If this card is covered, you may shift it."
+            "text": ""
         },
         "bottom": {
             "emphasis": "",
@@ -2189,7 +2189,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "State a protocol. Discard the top card of your opponent\u00b4s deck. If the discarded card matches the stated protocol, delete 1 card."
+            "text": "State a protocol. Discard the top card of your opponent´s deck. If the discarded card matches the stated protocol, delete 1 card."
         },
         "bottom": {
             "emphasis": "",
@@ -2375,11 +2375,11 @@
         "value": 0,
         "top": {
             "emphasis": "",
-            "text": "Your total value in this line is increased by 1 for each of your opponent\u00b4s cards in this line."
+            "text": "Your total value in this line is increased by 1 for each of your opponent´s cards in this line."
         },
         "middle": {
             "emphasis": "",
-            "text": "You discard 1 card."
+            "text": ""
         },
         "bottom": {
             "emphasis": "",
@@ -2399,11 +2399,11 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "You discard 1 card."
+            "text": ""
         },
         "bottom": {
             "emphasis": "End:",
-            "text": "You may resolve the middle command of 1 of your opponent\u00b4s cards as if it were on this card."
+            "text": "You may resolve the middle command of 1 of your opponent´s cards as if it were on this card."
         },
         "keywords": {},
         "set": "MN02"
@@ -2437,7 +2437,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "Flip 1 of your cards. Flip 1 of your opponent\u00b4s cards in the same line."
+            "text": "Flip 1 of your cards. Flip 1 of your opponent´s cards in the same line."
         },
         "bottom": {
             "emphasis": "",
@@ -2458,7 +2458,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "You discard 1 card."
+            "text": ""
         },
         "bottom": {
             "emphasis": "After your opponent draws cards:",
@@ -2564,10 +2564,10 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "You discard 1 card."
+            "text": ""
         },
         "bottom": {
-            "emphasis": "After you discard cards during your opponent\u00b4s turn:",
+            "emphasis": "After you discard cards during your opponent´s turn:",
             "text": "Draw 1 card."
         },
         "keywords": {
@@ -3399,7 +3399,7 @@
         "protocol": "Unity",
         "value": 1,
         "top": {
-            "emphasis": "",
+            "emphasis": "Start:",
             "text": "If this card is covered, you may shift this card."
         },
         "middle": {
@@ -3444,7 +3444,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "If there is another Unity card in the field, you may flip 1 card."
+            "text": "If there is another Unity card in the field, you may flip 1 face-up card."
         },
         "bottom": {
             "emphasis": "",
@@ -3459,8 +3459,8 @@
         "protocol": "Unity",
         "value": 4,
         "top": {
-            "emphasis": "",
-            "text": ""
+            "emphasis": "End:",
+            "text": "If your hand is empty, reveal your deck, draw all Unity cards from it, then shuffle your deck."
         },
         "middle": {
             "emphasis": "",
@@ -3468,7 +3468,7 @@
         },
         "bottom": {
             "emphasis": "",
-            "text": "If your hand is empty, reveal your deck, draw all Unity cards from it, then shuffle your deck."
+            "text": ""
         },
         "keywords": {
             "discard": true
@@ -3502,7 +3502,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "You discard 1 card."
+            "text": ""
         },
         "bottom": {
             "emphasis": "After your opponent draws cards:",
@@ -3525,7 +3525,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "You discard 1 card."
+            "text": ""
         },
         "bottom": {
             "emphasis": "After your opponent refreshes:",
@@ -3592,7 +3592,7 @@
         },
         "middle": {
             "emphasis": "",
-            "text": "our opponent discards 1 card."
+            "text": "Your opponent discards 1 card."
         },
         "bottom": {
             "emphasis": "",
