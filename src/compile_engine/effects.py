@@ -251,7 +251,7 @@ def flip_card(state: GameState, line_idx: int, player: int, stack_pos: int) -> C
     # effect so the UI can show that the flip was blocked.
     d = state.defs[c.def_id]
     if d.key == "MN02:Ice:4" and c.face_up:
-        logInfo(state, f"Flip on {d.protocol} {d.value} was blocked (immune).")
+        state.log.append(f"Flip on {d.protocol} {d.value} was blocked (immune).")
         return c
     was_up = c.face_up
     c.face_up = not c.face_up
@@ -4266,7 +4266,7 @@ def _diversity_0_middle(state, ap, li, card):
         for slot, p in enumerate(state.players[ap].protocols):
             if p == "Diversity":
                 state.players[ap].compiled[slot] = True
-                logInfo(state, f"P{ap + 1} compiled Diversity via diversity-0 condition (6 protocols on field).")
+                state.log.append(f"P{ap + 1} compiled Diversity via diversity-0 condition (6 protocols on field).")
                 break
     if False:
         yield  # pragma: no cover

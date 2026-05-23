@@ -6,8 +6,14 @@ formatted table that updates as new iters land, and shows a progress bar
 
 Usage:
     python scripts/az/watch.py runs/<timestamp>-az/metrics.jsonl
-    python scripts/az/watch.py runs/<timestamp>-az          # also accepts a run dir
-    python scripts/az/watch.py                              # auto-pick newest -az run
+    python scripts/az/watch.py runs/<timestamp>-az            # also accepts a run dir
+    python scripts/az/watch.py                                # auto-pick newest -az run
+    python scripts/az/watch.py --iters 500                    # override total-iters guess
+
+The total-iters guess defaults to whatever `--iters` is passed; if
+omitted, the script tries to sniff it from the run's `train.log` and
+falls back to 500. The progress bar/ETA only depend on this guess —
+the data itself comes from metrics.jsonl.
 """
 
 from __future__ import annotations
@@ -45,13 +51,15 @@ def find_metrics_path(arg: str | None) -> Path:
             if cand.is_file():
                 return cand
         raise SystemExit(f"no metrics.jsonl at {arg}")
-    # Auto-pick the newest *-az run dir. We don't gate on
+    # Auto-pick the newest AZ run dir. Matches both `*-az` (original
+    # naming) and `*-az-fresh` / `*-az-*` variants. We don't gate on
     # metrics.jsonl existing yet — a fresh run hasn't written the
     # first record, but we still want to point at it (it'll appear
     # after iter 1).
-    runs = sorted(Path("runs").glob("*-az"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not runs:
-        raise SystemExit("no *-az run dir found in runs/; pass a path explicitly")
+    candidates = list(Path("runs").glob("*-az")) + list(Path("runs").glob("*-az-*"))
+    if not candidates:
+        raise SystemExit("no *-az* run dir found in runs/; pass a path explicitly")
+    runs = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
     return runs[0] / "metrics.jsonl"
 
 
@@ -178,14 +186,47 @@ def read_all(path: Path) -> list[dict]:
     return out
 
 
+def _sniff_total_iters(run_dir: Path, fallback: int = 500) -> int:
+    """Scan the run's train.log for the `--iters N` invocation arg.
+    Falls back to `fallback` if not found."""
+    log = run_dir / "train.log"
+    if not log.exists():
+        return fallback
+    try:
+        with log.open() as f:
+            head = f.read(4096)
+        # Look for `--iters 500` style; greedy scan, take the first hit.
+        import re
+        m = re.search(r"--iters\s+(\d+)", head)
+        if m:
+            return int(m.group(1))
+    except OSError:
+        pass
+    return fallback
+
+
 def main() -> int:
-    arg = sys.argv[1] if len(sys.argv) > 1 else None
-    metrics_path = find_metrics_path(arg)
+    # Parse args: optional positional path + optional --iters N.
+    cli_iters: int | None = None
+    pos_arg: str | None = None
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--iters" and i + 1 < len(args):
+            cli_iters = int(args[i + 1])
+            i += 2
+        elif a.startswith("--iters="):
+            cli_iters = int(a.split("=", 1)[1])
+            i += 1
+        else:
+            pos_arg = a
+            i += 1
+    metrics_path = find_metrics_path(pos_arg)
     run_label = str(metrics_path.parent.name)
 
-    # Try to infer total iters from a snapshot range; fall back to 200.
-    # (Cheap & robust enough.)
-    total_iters = 200
+    # Total-iters for the progress bar / ETA: --iters > train.log sniff > 500.
+    total_iters = cli_iters if cli_iters is not None else _sniff_total_iters(metrics_path.parent)
 
     # Render once on startup so the user sees the header + "0/N" even
     # if metrics.jsonl doesn't exist yet (e.g. a fresh run before iter 1).

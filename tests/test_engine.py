@@ -1290,6 +1290,85 @@ def test_assim_0_steals_covered_opp_card():
     )
 
 
+def test_ice_4_flip_block_logs_cleanly():
+    """Ice 4 immunity path: flip_card on a face-up Ice 4 should log
+    "blocked" via state.log.append and return without modifying the
+    card. Regression for a NameError that surfaced during AZ training
+    (the path called `logInfo` — a TS naming — which doesn't exist in
+    the Python engine)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import flip_card
+    g = Game(GameConfig(seed=80, include_main2=True))
+    g.set_predetermined_draft([["Ice", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    ice_4 = next(d for d in defs if d.key == "MN02:Ice:4")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    inst = CardInst(inst_id=80001, def_id=ice_4.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [inst]
+    g.state.scratch["_engine"] = g
+    # Should NOT raise. Card stays face-up.
+    flip_card(g.state, 0, 0, 0)
+    assert inst.face_up, "Ice 4 should remain face-up after a blocked flip"
+    assert any("Ice 4" in entry and "blocked" in entry for entry in g.state.log), (
+        f"expected Ice 4 block log; got {g.state.log}"
+    )
+
+
+def test_diversity_0_middle_logs_compile_cleanly():
+    """Diversity 0 middle: when 6 distinct face-up protocols exist on
+    the field, flip the Diversity protocol to compiled. Regression for
+    a NameError on the post-compile log line (`logInfo` → must be
+    `state.log.append`)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import MIDDLE_EFFECTS
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=81, include_main2=True, include_aux2=True))
+    g.set_predetermined_draft([
+        ["Diversity", "Light", "Fire"], ["Death", "Water", "Speed"],
+    ])
+    defs = load_card_defs()
+    diversity_0 = next(d for d in defs if d.key == "AX02:Diversity:0")
+    light_0 = next(d for d in defs if d.key == "MN01:Light:0")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    death_0 = next(d for d in defs if d.key == "MN01:Death:0")
+    water_0 = next(d for d in defs if d.key == "MN01:Water:0")
+    speed_0 = next(d for d in defs if d.key == "MN01:Speed:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    d0_inst = CardInst(inst_id=81001, def_id=diversity_0.def_id, owner=0, face_up=True)
+    # Cover 6 distinct protocols: Diversity, Light, Fire, Death, Water, Speed.
+    g.state.lines[0].p0_stack = [
+        d0_inst,
+        CardInst(inst_id=81002, def_id=light_0.def_id, owner=0, face_up=True),
+    ]
+    g.state.lines[1].p0_stack = [
+        CardInst(inst_id=81003, def_id=fire_0.def_id, owner=0, face_up=True),
+    ]
+    g.state.lines[2].p0_stack = [
+        CardInst(inst_id=81004, def_id=death_0.def_id, owner=0, face_up=True),
+    ]
+    g.state.lines[0].p1_stack = [
+        CardInst(inst_id=81005, def_id=water_0.def_id, owner=1, face_up=True),
+    ]
+    g.state.lines[1].p1_stack = [
+        CardInst(inst_id=81006, def_id=speed_0.def_id, owner=1, face_up=True),
+    ]
+    g.state.scratch["_engine"] = g
+    fn = MIDDLE_EFFECTS["AX02:Diversity:0"]
+    gen = fn(g.state, 0, 0, d0_inst)
+    try:
+        next(gen)
+    except StopIteration:
+        pass
+    # P0 had Diversity in slot 0 → should now be compiled.
+    assert g.state.players[0].compiled[0] is True, (
+        f"Diversity slot should be compiled; got {g.state.players[0].compiled}"
+    )
+    assert any("Diversity" in entry and "compiled" in entry.lower() for entry in g.state.log)
+
+
 def test_uncover_trigger_fires_when_top_card_deleted():
     """Codex p.3 "Middle Command — Immediate: Resolve this active text upon
     card play/flip/uncover." When the top card of a stack is deleted, the
