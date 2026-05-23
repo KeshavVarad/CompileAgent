@@ -24,14 +24,16 @@ type Props = {
 };
 
 // Fixed dimensions so stacked field cards overlap by a predictable amount.
-// Layout: header (28) + 3 tiers (52 each) + footer (8) = 192px total.
-// Stack overlap = middle + bottom + footer = 112px → the upper card hides
-// the lower card's M + B tiers, leaving header + top tier visible. This
-// matches Codex p.13 ("Top Command — Persistent: this passive text is
-// never covered") and the rulebook back-cover note ("always ensure that
-// the Value and the Top Command are always visible when covered").
-export const CARD_TOTAL_PX = 192;
-export const CARD_OVERLAP_PX = 112;
+// Layout: header (28) + 3 tiers (52 each) + footer (8) = 192px total at
+// 16px root font. Stack overlap = middle + bottom + footer = 112px → the
+// upper card hides the lower card's M + B tiers, leaving header + top
+// tier visible. This matches Codex p.13 ("Top Command — Persistent: this
+// passive text is never covered") and the rulebook back-cover note
+// ("always ensure that the Value and the Top Command are always visible
+// when covered"). Values expressed in rem so the cards scale with the
+// responsive root font-size set in globals.css.
+export const CARD_TOTAL_HEIGHT = "12rem";   // 192px at 16px root
+export const CARD_OVERLAP_HEIGHT = "7rem";  // 112px at 16px root
 
 export function PlayCard({
   card,
@@ -96,14 +98,14 @@ export function PlayCard({
             }
           : undefined
       }
-      style={{ height: CARD_TOTAL_PX }}
+      style={{ height: CARD_TOTAL_HEIGHT }}
       className={cn(
         // Solid card body — no opacity even when face-down. A face-down
         // card that's been played from the recorder's own seat is fully
         // known to the engine, and it still needs to opaquely cover the
         // bottom of whatever card it's stacked on top of.
         "relative flex flex-col rounded-md border bg-card text-card-foreground shadow-sm overflow-hidden select-none transition",
-        "w-full max-w-[178px]",
+        "w-full max-w-[11.125rem]",
         card.isCommitted && "ring-1 ring-amber-500/50",
         selected && "ring-2 ring-emerald-500/70",
         interactive && "cursor-pointer hover:border-foreground/40",
@@ -149,7 +151,7 @@ function CardTier({
     <div
       className={cn(
         "shrink-0 px-2 py-1 text-[10px] leading-snug border-t overflow-hidden",
-        "h-[52px]",
+        "h-[3.25rem]",
         active && "bg-emerald-500/10",
       )}
     >
@@ -213,14 +215,14 @@ function FaceDownBack({
             }
           : undefined
       }
-      style={{ height: CARD_TOTAL_PX }}
+      style={{ height: CARD_TOTAL_HEIGHT }}
       className={cn(
         // Solid card body so face-down cards opaquely cover the bottom
         // tiers of the card beneath them in a stack (rather than being a
         // ghosted overlay you can read text through). `bg-muted` gives
         // the back a clear "different from face-up" colour while staying
         // fully opaque.
-        "relative w-full max-w-[178px] rounded-md border border-foreground/15 bg-muted text-muted-foreground shadow-sm",
+        "relative w-full max-w-[11.125rem] rounded-md border border-foreground/15 bg-muted text-muted-foreground shadow-sm",
         "flex flex-col items-center justify-center select-none transition",
         selected && "ring-2 ring-emerald-500/70",
         interactive && "cursor-pointer hover:bg-muted/80 hover:border-foreground/40",

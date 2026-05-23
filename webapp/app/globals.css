@@ -128,3 +128,13 @@
     @apply font-sans;
   }
 }
+
+/* Responsive root font-size: every rem-based class (typography, spacing,
+ * max-widths, even Tailwind v4's rem-based breakpoints) scales with this.
+ * The defaults (12-14px UI text) become uncomfortably small on monitors
+ * above ~1080p, so bump the root font in coarse steps tied to common
+ * viewport widths. Sub-1536 keeps the design as-is for laptops. */
+@media (min-width: 1536px) { :root { font-size: 17px; } }
+@media (min-width: 1920px) { :root { font-size: 18px; } }
+@media (min-width: 2560px) { :root { font-size: 20px; } }
+@media (min-width: 3840px) { :root { font-size: 22px; } }
