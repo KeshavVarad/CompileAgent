@@ -108,7 +108,58 @@ def row_str(rec: dict) -> str:
     )
 
 
-def render(records: list[dict], total_iters: int, run_label: str) -> None:
+def detect_crash(run_dir: Path) -> str | None:
+    """Inspect the run's train.log + check whether the trainer process is
+    still alive. Returns a short multi-line summary if the run crashed
+    (Python Traceback in the log AND no live process), else None.
+
+    "No live process" is determined by greping the process table for the
+    save_dir's basename — robust against PID reuse and matches whether the
+    user launched via the wrapper script or directly via `python -m`.
+    """
+    log = run_dir / "train.log"
+    if not log.exists():
+        return None
+    # Cheap tail: read at most the last 16 KB to find a traceback.
+    try:
+        with log.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 16384))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    if "Traceback (most recent call last):" not in tail:
+        return None
+    # Is the trainer still running? If so the traceback is from a worker
+    # that was caught and recovered (rare but possible) — don't false-alarm.
+    import subprocess
+    try:
+        ps = subprocess.run(
+            ["pgrep", "-f", run_dir.name],
+            capture_output=True, text=True, timeout=3,
+        )
+        if ps.returncode == 0 and ps.stdout.strip():
+            return None  # still running
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        # If we can't determine, assume crash to be safe — better to
+        # over-notify than miss a real crash.
+        pass
+    # Extract a tight summary: traceback line + final error line.
+    lines = tail.splitlines()
+    # Index of the last "Traceback (...)" — there can be more than one.
+    tb_starts = [i for i, ln in enumerate(lines) if "Traceback (most recent call last):" in ln]
+    if not tb_starts:
+        return None
+    start = tb_starts[-1]
+    body = lines[start:]
+    # Trim to 12 lines max so the watch screen stays readable.
+    if len(body) > 12:
+        body = body[:6] + [f"... ({len(body) - 12} lines elided) ..."] + body[-6:]
+    return "\n".join(body)
+
+
+def render(records: list[dict], total_iters: int, run_label: str, crash: str | None = None) -> None:
     # Clear screen, redraw the whole thing. Simple and robust against
     # column-width drift.
     print("\033[2J\033[H", end="")  # ANSI clear screen + home cursor
@@ -157,6 +208,19 @@ def render(records: list[dict], total_iters: int, run_label: str) -> None:
                 f"vs greedy = {C_GREEN}{wr_g:.2f}{C_RESET}, "
                 f"vs random = {C_GREEN}{wr_r:.2f}{C_RESET}"
             )
+
+    if crash is not None:
+        # Loud, attention-grabbing crash block. The watch loop also rings
+        # the terminal bell and exits non-zero so it can be wrapped in a
+        # script if you want desktop notifications.
+        print()
+        print(f"  {C_RED}{C_BOLD}╔════ CRASH DETECTED ════╗{C_RESET}")
+        print(f"  {C_RED}{C_BOLD}║ trainer process is gone {C_RESET}")
+        print(f"  {C_RED}{C_BOLD}║ tail of train.log:      {C_RESET}")
+        for ln in crash.splitlines():
+            print(f"  {C_RED}║ {C_RESET}{ln}")
+        print(f"  {C_RED}{C_BOLD}╚═════════════════════════╝{C_RESET}")
+        return
 
     print()
     print(f"  {C_DIM}Ctrl-C to exit. Polling every 5s.{C_RESET}")
@@ -228,22 +292,65 @@ def main() -> int:
     # Total-iters for the progress bar / ETA: --iters > train.log sniff > 500.
     total_iters = cli_iters if cli_iters is not None else _sniff_total_iters(metrics_path.parent)
 
+    run_dir = metrics_path.parent
+
+    def _notify_macos(title: str, body: str) -> None:
+        """Best-effort macOS desktop notification via osascript. No-op on
+        other platforms or if osascript isn't on PATH."""
+        if sys.platform != "darwin":
+            return
+        import shlex, subprocess
+        # Escape any embedded quotes so the AppleScript string survives.
+        safe_body = body.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'display notification "{safe_body}" with title "{title}"'
+        try:
+            subprocess.run(
+                ["osascript", "-e", script], capture_output=True, timeout=3,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
     # Render once on startup so the user sees the header + "0/N" even
     # if metrics.jsonl doesn't exist yet (e.g. a fresh run before iter 1).
-    render(read_all(metrics_path), total_iters, run_label)
+    initial_crash = detect_crash(run_dir)
+    render(read_all(metrics_path), total_iters, run_label, crash=initial_crash)
+    if initial_crash is not None:
+        # The run was already dead when watch started.
+        sys.stdout.write("\a"); sys.stdout.flush()  # terminal bell
+        _notify_macos("AZ training crash", f"{run_label}: trainer dead, traceback in log")
+        return 2
+
     last_mtime: float | None = None
+    crash_notified = False
     try:
         while True:
             try:
                 mtime = metrics_path.stat().st_mtime
             except FileNotFoundError:
                 mtime = None
-            if mtime != last_mtime:
+
+            crash = detect_crash(run_dir)
+            if mtime != last_mtime or crash is not None:
                 last_mtime = mtime
                 records = read_all(metrics_path)
-                render(records, total_iters, run_label)
+                render(records, total_iters, run_label, crash=crash)
+                if crash is not None and not crash_notified:
+                    sys.stdout.write("\a"); sys.stdout.flush()
+                    last_iter = records[-1]["iter"] if records else 0
+                    _notify_macos(
+                        "AZ training crash",
+                        f"{run_label}: died after iter {last_iter}",
+                    )
+                    crash_notified = True
+                    # Exit non-zero so the caller can hook this for further
+                    # alerting (e.g. wrap in a shell loop that sends Slack).
+                    return 2
                 if records and records[-1]["iter"] >= total_iters:
                     print(f"\n{C_GREEN}{C_BOLD}Training complete.{C_RESET}")
+                    _notify_macos(
+                        "AZ training complete",
+                        f"{run_label}: {total_iters} iters done",
+                    )
                     return 0
             time.sleep(5)
     except KeyboardInterrupt:
