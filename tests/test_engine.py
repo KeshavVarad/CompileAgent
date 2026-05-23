@@ -2037,3 +2037,96 @@ def test_greedy_beats_random_more_often_than_not():
         wins[0 if greedy_won else 1] += 1
     # Allow some slack; greedy should win comfortably more than half.
     assert wins[0] > wins[1], f"greedy did not beat random: {wins}"
+
+
+def test_hate_2_second_clause_skipped_when_self_deleted():
+    """Codex p.12 clarification: 'If Hate 2 is the highest value card you
+    own it deletes itself as a result of the first clause. Thus, the
+    second clause no longer exists and does not trigger.'
+
+    Regression: prior to the source_still_active() guard, Hate 2's middle
+    handler ran both clauses unconditionally, so opp's highest-value card
+    was also deleted after Hate 2 self-deleted. With the guard, the
+    handler bails before the second iteration."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import _hate_2
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=200, include_expansion=True))
+    g.set_predetermined_draft([
+        ["Hate", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    hate_2 = next(d for d in defs if d.key == "AX01:Hate:2")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0's only uncovered card is Hate 2 (value 2) — it's the unambiguous
+    # "your highest value uncovered card."
+    h2 = CardInst(inst_id=20001, def_id=hate_2.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [h2]
+    # Opp has one uncovered card to delete IF the second clause fires.
+    opp_card = CardInst(inst_id=20002, def_id=light_1.def_id, owner=1, face_up=True)
+    g.state.lines[1].p1_stack = [opp_card]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    # Fire Hate 2's middle as if just played face-up in line 0.
+    g._push_effect(_hate_2(g.state, 0, 0, h2))
+    g._drive()
+    assert h2 not in g.state.lines[0].p0_stack, (
+        "Hate 2 should self-delete as P0's highest uncovered card"
+    )
+    assert opp_card in g.state.lines[1].p1_stack, (
+        "second clause should NOT fire after Hate 2 self-deletes — opp's "
+        "card must remain on the field"
+    )
+
+
+def test_hate_2_second_clause_fires_when_source_survives():
+    """Negative test for the source_still_active() guard: when Hate 2 is
+    NOT your highest (some other uncovered own card outranks it), the
+    first clause deletes that other card, Hate 2 stays on the field, and
+    the second clause proceeds to delete opp's highest."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import _hate_2
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=201, include_expansion=True))
+    g.set_predetermined_draft([
+        ["Hate", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    hate_2 = next(d for d in defs if d.key == "AX01:Hate:2")
+    fire_5 = next(d for d in defs if d.key == "MN01:Fire:5")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    h2 = CardInst(inst_id=20101, def_id=hate_2.def_id, owner=0, face_up=True)
+    higher_own = CardInst(inst_id=20102, def_id=fire_5.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [h2]
+    g.state.lines[1].p0_stack = [higher_own]  # value 5 > Hate 2's value 2
+    opp_card = CardInst(inst_id=20103, def_id=light_1.def_id, owner=1, face_up=True)
+    g.state.lines[2].p1_stack = [opp_card]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    g._push_effect(_hate_2(g.state, 0, 0, h2))
+    g._drive()
+    assert h2 in g.state.lines[0].p0_stack, (
+        "Hate 2 should survive (it isn't P0's highest)"
+    )
+    assert higher_own not in g.state.lines[1].p0_stack, (
+        "first clause should delete P0's actual highest (Fire 5)"
+    )
+    assert opp_card not in g.state.lines[2].p1_stack, (
+        "second clause should fire since Hate 2 is still active"
+    )

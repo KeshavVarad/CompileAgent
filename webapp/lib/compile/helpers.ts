@@ -281,6 +281,25 @@ export function flipCard(
   return c;
 }
 
+/**
+ * Returns true iff `card` is on the field, face-up, and the uncovered top of
+ * its stack. The Compile Codex (Hate 2 clarification p.12, Mirror 3 p.13) is
+ * explicit: a card's text stops resolving the moment the source card leaves
+ * play — whether by being deleted, flipped face-down, or covered. Use this
+ * between clauses of a multi-clause middle whose earlier clause could
+ * plausibly remove the source (self-target OR downstream cascade).
+ */
+export function sourceStillActive(state: GameState, card: CardInst): boolean {
+  if (!card.faceUp) return false;
+  for (const line of state.lines) {
+    for (const pl of [0, 1] as PlayerIndex[]) {
+      const stack = lineStack(line, pl);
+      if (stack.length > 0 && stack[stack.length - 1] === card) return true;
+    }
+  }
+  return false;
+}
+
 export function shiftCard(
   state: GameState,
   srcLine: number,
