@@ -52,6 +52,12 @@ export const games = pgTable("games", {
   // Result snapshot (populated when game ends)
   winner: integer("winner"),
   turnCount: integer("turn_count"),
+  // Persisted AI review. `evalResult` is the full payload the eval dialog
+  // renders. `evalActionCount` records how many actions were in the log
+  // when this eval ran — the UI compares it against the live action count
+  // to flag the eval as "stale" if the game has progressed since.
+  evalResult: jsonb("eval_result").$type<unknown>(),
+  evalActionCount: integer("eval_action_count"),
 });
 
 export type Game = typeof games.$inferSelect;
