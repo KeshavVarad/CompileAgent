@@ -92,6 +92,11 @@ class TrainConfig:
     seed: int = 0
     device: str = "cpu"
     save_dir: str | None = None
+    # Optional warm-start: path to a snapshot file ({"model": state_dict, ...}).
+    # Same format the PPO and AZ trainers both write, so an AZ checkpoint
+    # can be handed to PPO (and vice versa) as long as the model
+    # architecture and encoder shape match the current code.
+    init_ckpt: str | None = None
 
 
 def _make_config(rng: random.Random, base: TrainConfig) -> GameConfig:
@@ -261,9 +266,16 @@ def evaluate(
     expansion_prob: float = 0.5, main2_prob: float = 0.4, aux2_prob: float = 0.4,
     seed: int = 0,
 ) -> dict:
-    """Inference-mode (argmax) win-rate vs `opponent`. Alternates seats."""
+    """Stochastic-policy win-rate vs `opponent`. Alternates seats.
+
+    Eval samples from the policy (rather than argmaxing) because the
+    deployed agent will also sample at inference — we're targeting a
+    mixed Nash equilibrium, not a deterministic policy. Argmax WR would
+    over-state the trainee against an opponent that exploits its
+    determinism.
+    """
     rng = random.Random(seed)
-    agent = NNAgent(model, device=device, stochastic=False)
+    agent = NNAgent(model, device=device, stochastic=True)
     wins = {0: 0, 1: 0, None: 0}
     agent_wins = 0
     for i in range(n_games):
@@ -410,6 +422,17 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
     np_rng = np.random.default_rng(cfg.seed)
 
     model = PolicyValueNet().to(device)
+    if cfg.init_ckpt:
+        state = torch.load(cfg.init_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(state["model"])
+        src_iter = state.get("iter")
+        src_wrg = state.get("wr_greedy")
+        print(
+            f"Hot-started PPO from {cfg.init_ckpt}"
+            + (f" (source iter={src_iter}" if src_iter is not None else " (")
+            + (f", wr_greedy={src_wrg:.2f}" if src_wrg is not None else "")
+            + ")"
+        )
     optimiser = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     # Adaptive entropy coefficient — we let `cfg.c_entropy` be the starting
@@ -427,6 +450,19 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
     )
     pool.add(RandomAgent(seed=1), "random", is_anchor=True)
     pool.add(GreedyAgent(seed=2), "greedy", is_anchor=True)
+    # When hot-starting, seed the pool with a frozen copy of the source so
+    # PFSP has something stronger than random/greedy to weight against.
+    # Without this the first iters of PPO sample mostly weak opponents
+    # and the policy regresses toward beating-random tactics.
+    if cfg.init_ckpt:
+        frozen = copy.deepcopy(model).eval()
+        # Stochastic pool opponents — matches inference behavior and is
+        # the right target for a mixed-equilibrium policy. See the eval
+        # docstring above for the same reasoning.
+        pool.add(
+            NNAgent(frozen, device=device, stochastic=True),
+            name=Path(cfg.init_ckpt).stem,
+        )
 
     save_dir = Path(cfg.save_dir) if cfg.save_dir else None
     if save_dir is not None:
@@ -528,8 +564,10 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
                 record["snapshot_path"] = str(ckpt_path)
             if wr_random >= cfg.pool_threshold_wr_random:
                 frozen = copy.deepcopy(model).eval()
+                # Stochastic — target mixed equilibrium, not argmax-exploitable
+                # prior selves. See eval docstring above.
                 evicted = pool.add(
-                    NNAgent(frozen, device=device, stochastic=False),
+                    NNAgent(frozen, device=device, stochastic=True),
                     name=f"iter_{it:05d}",
                 )
                 record["pool_grew"] = True

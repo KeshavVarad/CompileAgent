@@ -35,7 +35,12 @@ from compile_engine.nn.model import PolicyValueNet  # noqa: E402
 N_LINES = 3
 N_PHASES = 9
 SCALARS_DIM = 8
-RAW_ACTION_DIM = 10 + 1 + 4 + 4 + 1 + 8 + 1  # 29
+# Action raw-features dim. Bumped when the encoder added action-lookahead
+# closed-form features + a pending-card-context channel. Source of truth
+# is encoder.encode_actions: this constant just needs to match the second
+# axis of `raw_feats` it returns. Inspect with:
+#   raw, *_ = encode_actions(game, legal, perspective); raw.shape[1]
+RAW_ACTION_DIM = 38
 
 
 class FlatPolicyValueNet(nn.Module):
@@ -52,6 +57,7 @@ class FlatPolicyValueNet(nn.Module):
     def forward(
         self,
         field_tokens: torch.Tensor,       # [B, 3, 2, MAX_STACK] int64
+        field_flags: torch.Tensor,        # [B, 3, 2, MAX_STACK, 3] float32
         field_meta: torch.Tensor,         # [B, 3, 2, 3]         float32
         protocols: torch.Tensor,          # [B, 2, 3, 2]         int64
         hand_tokens: torch.Tensor,        # [B, MAX_HAND]        int64
@@ -60,13 +66,18 @@ class FlatPolicyValueNet(nn.Module):
         line_vals: torch.Tensor,          # [B, 3, 2]            float32
         scalars: torch.Tensor,            # [B, 8]               float32
         phase: torch.Tensor,              # [B, 9]               float32
-        action_raw: torch.Tensor,         # [B, MAX_ACTIONS, RAW_ACTION_DIM] float32
-        action_card_ids: torch.Tensor,    # [B, MAX_ACTIONS]     int64
-        action_proto_ids: torch.Tensor,   # [B, MAX_ACTIONS]     int64
-        action_mask: torch.Tensor,        # [B, MAX_ACTIONS]     bool
+        pending_card_token: torch.Tensor, # [B]                  int64
+        pending_category: torch.Tensor,   # [B, 17]              float32
+        pending_depth_norm: torch.Tensor, # [B, 1]               float32
+        action_raw: torch.Tensor,             # [B, MAX_ACTIONS, RAW_ACTION_DIM] float32
+        action_card_ids: torch.Tensor,        # [B, MAX_ACTIONS]     int64
+        action_proto_ids: torch.Tensor,       # [B, MAX_ACTIONS]     int64
+        action_extra_card_ids: torch.Tensor,  # [B, MAX_ACTIONS]     int64
+        action_mask: torch.Tensor,            # [B, MAX_ACTIONS]     bool
     ) -> tuple[torch.Tensor, torch.Tensor]:
         state = {
             "field_tokens": field_tokens,
+            "field_flags": field_flags,
             "field_meta": field_meta,
             "protocols": protocols,
             "hand_tokens": hand_tokens,
@@ -75,9 +86,13 @@ class FlatPolicyValueNet(nn.Module):
             "line_vals": line_vals,
             "scalars": scalars,
             "phase": phase,
+            "pending_card_token": pending_card_token,
+            "pending_category": pending_category,
+            "pending_depth_norm": pending_depth_norm,
         }
         logits, value = self.inner(
-            state, action_raw, action_card_ids, action_proto_ids, action_mask,
+            state, action_raw, action_card_ids, action_proto_ids,
+            action_extra_card_ids, action_mask,
         )
         return logits, value
 
@@ -86,6 +101,7 @@ def dummy_inputs(batch: int = 1) -> dict[str, torch.Tensor]:
     rng = np.random.default_rng(0)
     return {
         "field_tokens": torch.zeros(batch, N_LINES, 2, MAX_STACK, dtype=torch.int64),
+        "field_flags": torch.zeros(batch, N_LINES, 2, MAX_STACK, 3, dtype=torch.float32),
         "field_meta": torch.zeros(batch, N_LINES, 2, 3, dtype=torch.float32),
         "protocols": torch.zeros(batch, 2, N_LINES, 2, dtype=torch.int64),
         "hand_tokens": torch.zeros(batch, MAX_HAND, dtype=torch.int64),
@@ -94,11 +110,15 @@ def dummy_inputs(batch: int = 1) -> dict[str, torch.Tensor]:
         "line_vals": torch.zeros(batch, N_LINES, 2, dtype=torch.float32),
         "scalars": torch.zeros(batch, SCALARS_DIM, dtype=torch.float32),
         "phase": torch.zeros(batch, N_PHASES, dtype=torch.float32),
+        "pending_card_token": torch.zeros(batch, dtype=torch.int64),
+        "pending_category": torch.zeros(batch, 17, dtype=torch.float32),
+        "pending_depth_norm": torch.zeros(batch, 1, dtype=torch.float32),
         "action_raw": torch.tensor(
             rng.standard_normal((batch, MAX_ACTIONS, RAW_ACTION_DIM)).astype(np.float32),
         ),
         "action_card_ids": torch.zeros(batch, MAX_ACTIONS, dtype=torch.int64),
         "action_proto_ids": torch.zeros(batch, MAX_ACTIONS, dtype=torch.int64),
+        "action_extra_card_ids": torch.zeros(batch, MAX_ACTIONS, dtype=torch.int64),
         # Mark the first 5 actions as legal so masked softmax has something
         # to work with during the smoke test.
         "action_mask": torch.tensor(
@@ -113,9 +133,11 @@ def verify(onnx_path: Path, torch_model: nn.Module) -> None:
     inputs = dummy_inputs(batch=1)
     with torch.no_grad():
         torch_logits, torch_value = torch_model(*[inputs[k] for k in [
-            "field_tokens", "field_meta", "protocols", "hand_tokens", "hand_size",
-            "trash", "line_vals", "scalars", "phase",
-            "action_raw", "action_card_ids", "action_proto_ids", "action_mask",
+            "field_tokens", "field_flags", "field_meta", "protocols",
+            "hand_tokens", "hand_size", "trash", "line_vals", "scalars", "phase",
+            "pending_card_token", "pending_category", "pending_depth_norm",
+            "action_raw", "action_card_ids", "action_proto_ids",
+            "action_extra_card_ids", "action_mask",
         ]])
 
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
@@ -147,9 +169,11 @@ def main() -> None:
 
     inputs = dummy_inputs(batch=1)
     input_names = [
-        "field_tokens", "field_meta", "protocols", "hand_tokens", "hand_size",
-        "trash", "line_vals", "scalars", "phase",
-        "action_raw", "action_card_ids", "action_proto_ids", "action_mask",
+        "field_tokens", "field_flags", "field_meta", "protocols",
+        "hand_tokens", "hand_size", "trash", "line_vals", "scalars", "phase",
+        "pending_card_token", "pending_category", "pending_depth_norm",
+        "action_raw", "action_card_ids", "action_proto_ids",
+        "action_extra_card_ids", "action_mask",
     ]
     # Dynamic axis 0 (batch). MAX_ACTIONS / MAX_HAND / MAX_STACK are fixed.
     dynamic_axes = {n: {0: "batch"} for n in input_names}
