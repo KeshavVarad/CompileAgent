@@ -3155,6 +3155,14 @@ def _courage_1(state, ap, li, card):
         delete_card_from_field(state, t[0], t[1], t[2])
 
 
+# Courage 2 middle — "Draw 1 card."
+@middle("MN02:Courage:2")
+def _courage_2_middle(state, ap, li, card):
+    draw_cards(state, ap, 1)
+    if False:
+        yield None  # type: ignore[misc]
+
+
 # Courage 2 bottom — "End: If your opponent has a higher total value than
 # you do in this line, draw 1 card." Fires only while uncovered.
 @end_trigger("MN02:Courage:2")
@@ -3270,8 +3278,8 @@ def _fear_2(state, ap, li, card):
         return_card_to_hand(state, t[0], t[1], t[2])
 
 
-@bottom_on_play("MN02:Fear:3")
-def _fear_3_bottom(state, ap, li, card):
+@middle("MN02:Fear:3")
+def _fear_3(state, ap, li, card):
     # Shift 1 of opp's covered or uncovered cards in this line.
     opp = state.opponent(ap)
     targets: list[tuple[int, int, int, CardInst]] = []
@@ -3306,8 +3314,8 @@ def _fear_4(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@bottom_on_play("MN02:Fear:5")
-def _fear_5_bottom(state, ap, li, card):
+@middle("MN02:Fear:5")
+def _fear_5(state, ap, li, card):
     yield from _discard_n(state, ap, 1)
 
 
@@ -3366,24 +3374,37 @@ def _ice_2(state, ap, li, card):
         shift_card(state, t[0], t[1], t[2], dest[didx])
 
 
-@middle("MN02:Ice:3")
-def _ice_3(state, ap, li, card):
-    # If this card is covered, you may shift it.
-    s = state.lines[li].stack(card.owner)
-    if card not in s or s.index(card) == len(s) - 1:
-        return  # not covered
-    cur_pos = s.index(card)
-    dest = [i for i in range(NUM_LINES) if i != li]
+# Ice 3 top — "End: If this card is covered, you may shift it." Fires
+# at end of turn while face-up. Top-tier text is active regardless of
+# cover, so we don't need an "is top-of-stack" check; the card just has
+# to be face-up + covered (which is the very condition we want).
+@end_trigger("MN02:Ice:3")
+def _ice_3_end(state, ap, li, card):
+    if not card.face_up:
+        return
+    # Re-locate Ice 3 in case it's been shifted since play.
+    cur_line, cur_pos = None, None
+    for ln in range(NUM_LINES):
+        s = state.lines[ln].stack(card.owner)
+        if card in s:
+            cur_line, cur_pos = ln, s.index(card)
+            break
+    if cur_line is None:
+        return
+    s = state.lines[cur_line].stack(card.owner)
+    if cur_pos == len(s) - 1:
+        return  # not covered, condition false
+    dest = [i for i in range(NUM_LINES) if i != cur_line]
     if not dest:
         return
     idx = yield Choice(
-        prompt="(optional) Shift Ice 3 (covered) to another line",
+        prompt="(optional) Shift covered Ice 3 to another line",
         options=[str(i) for i in dest] + ["skip"], targets=dest + [-1],
         optional=True, decider=ap,
     )
     if idx == -1 or idx >= len(dest):
         return
-    shift_card(state, li, card.owner, cur_pos, dest[idx])
+    shift_card(state, cur_line, card.owner, cur_pos, dest[idx])
 
 
 # ---------------------------------------------------------------------------
@@ -4285,13 +4306,16 @@ def _unity_0_first(state, ap, li, card):
 
 @middle("AX02:Unity:3")
 def _unity_3(state, ap, li, card):
+    # "If there is another Unity card in the field, you may flip 1
+    # face-up card." Flipping face-down cards is excluded by the card
+    # text (the "face-up" filter on enumeration).
     if _count_unity_in_field(state) <= 1:
         return
-    targets = _enumerate_uncovered(state, exclude=card, active_player=ap)
+    targets = _enumerate_uncovered(state, exclude=card, face="up", active_player=ap)
     if not targets:
         return
     opts = [_describe_card(state, t[0], t[1], t[3], viewer=ap) for t in targets]
-    idx = yield Choice(prompt="(optional) Flip 1 card",
+    idx = yield Choice(prompt="(optional) Flip 1 face-up card",
                        options=opts, targets=targets, optional=True, decider=ap)
     if idx == -1 or not (0 <= idx < len(targets)):
         return
@@ -4304,10 +4328,13 @@ def _unity_3(state, ap, li, card):
 # Diversity 2, and a duplicate Ice 5). Once the data was corrected the slots
 # became real cards whose effects we hadn't implemented. Adding them here.
 
-@bottom_on_play("AX02:Assimilation:6")
-def _assim_6_bottom(state, ap, li, card):
-    """Play the top card of your deck face down on your opponent's side
-    of the field. Player picks which opponent line."""
+@end_trigger("AX02:Assimilation:6")
+def _assim_6_end(state, ap, li, card):
+    """End: play the top card of your deck face-down on your opponent's
+    side. Bottom-tier End: triggers fire only while uncovered."""
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     if not state.players[ap].deck:
         return
     opts = [f"opp L{i + 1}" for i in range(NUM_LINES)]
@@ -4338,12 +4365,15 @@ def _diversity_0_middle(state, ap, li, card):
         yield  # pragma: no cover
 
 
-@bottom_on_play("AX02:Diversity:0")
-def _diversity_0_bottom(state, ap, li, card):
-    """End step: you may play one non-Diversity card in this line.
-    Stubbed as a no-op — the legal-action enumeration for this affordance
-    would need a new ACTION variant; for now the player's regular plays
-    cover the common case."""
+@end_trigger("AX02:Diversity:0")
+def _diversity_0_end(state, ap, li, card):
+    """End: you may play one non-Diversity card in this line. Stubbed as
+    a no-op — the legal-action enumeration for this affordance would
+    need a new ACTION variant; for now the player's regular plays cover
+    the common case. Bottom-tier End: only fires while uncovered."""
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     if False:
         yield  # pragma: no cover
 
@@ -4397,10 +4427,13 @@ def _assim_0(state, ap, li, card):
     _check_diversity_6_self_destruct(state)
 
 
-@bottom_on_play("AX02:Assimilation:2")
-def _assim_2_bottom(state, ap, li, card):
-    # B: Play the top card of your opponent's deck face down in this
-    # stack (ap's side of `li`).
+@end_trigger("AX02:Assimilation:2")
+def _assim_2_end(state, ap, li, card):
+    """End: play the top card of your opponent's deck face-down in YOUR
+    stack in this line. Bottom-tier End: fires only while uncovered."""
+    stack = state.lines[li].stack(ap)
+    if not stack or stack[-1] is not card:
+        return
     opp = state.opponent(ap)
     ps_opp = state.players[opp]
     if not ps_opp.deck:
@@ -4483,6 +4516,38 @@ def _diversity_4(state, ap, li, card):
         flip_card(state, sln, spl, spos)
 
 
+# Unity 1 top — "Start: If this card is covered, you may shift this
+# card." Top-tier text is active while the card is face-up regardless of
+# cover, so we don't need a top-of-stack check; the condition is exactly
+# "this card is covered."
+@start_trigger("AX02:Unity:1")
+def _unity_1_start(state, ap, li, card):
+    if not card.face_up:
+        return
+    cur_line, cur_pos = None, None
+    for ln in range(NUM_LINES):
+        s = state.lines[ln].stack(card.owner)
+        if card in s:
+            cur_line, cur_pos = ln, s.index(card)
+            break
+    if cur_line is None:
+        return
+    s = state.lines[cur_line].stack(card.owner)
+    if cur_pos == len(s) - 1:
+        return  # not covered
+    dest = [i for i in range(NUM_LINES) if i != cur_line]
+    if not dest:
+        return
+    idx = yield Choice(
+        prompt="(optional) Shift covered Unity 1 to another line",
+        options=[str(i) for i in dest] + ["skip"], targets=dest + [-1],
+        optional=True, decider=ap,
+    )
+    if idx == -1 or idx >= len(dest):
+        return
+    shift_card(state, cur_line, card.owner, cur_pos, dest[idx])
+
+
 @middle("AX02:Unity:1")
 def _unity_1(state, ap, li, card):
     # M: If there are 5 or more Unity cards in the field, flip the Unity
@@ -4523,11 +4588,15 @@ def _unity_2(state, ap, li, card):
         yield  # pragma: no cover
 
 
-@bottom_on_play("AX02:Unity:4")
-def _unity_4_bottom(state, ap, li, card):
-    # B: If your hand is empty, reveal your deck, draw all Unity cards
-    # from it, then shuffle your deck. (Reveal is informational; we
-    # implicitly know what's in the deck.)
+@end_trigger("AX02:Unity:4")
+def _unity_4_end(state, ap, li, card):
+    # Top tier with End: emphasis — fires at end of turn while face-up
+    # (no uncovered requirement since top text is active regardless of
+    # cover).
+    if not card.face_up:
+        return
+    # If your hand is empty, reveal your deck, draw all Unity cards from
+    # it, then shuffle your deck.
     if state.players[ap].hand:
         return
     ps = state.players[ap]
