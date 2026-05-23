@@ -1369,6 +1369,127 @@ def test_diversity_0_middle_logs_compile_cleanly():
     assert any("Diversity" in entry and "compiled" in entry.lower() for entry in g.state.log)
 
 
+def test_metal_6_self_deletes_when_face_up_flipped():
+    """Metal 6 top: 'When this card would be covered or flipped: First,
+    delete this card.' Top text is active while face-up. When an effect
+    flips face-up Metal 6, it should self-delete BEFORE the flip lands
+    — the flip is consumed (Codex p.10) and Metal 6 ends up in trash.
+
+    Regression for a playtester report: the FLIP_TRIGGER broadcast
+    filtered on `c.face_up` post-flip, which silently skipped the
+    face-up→face-down transition path. Fixed by preempting in
+    `flip_card` (similar to the Ice 4 immunity check)."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import flip_card
+    g = Game(GameConfig(seed=90))
+    g.set_predetermined_draft([["Metal", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    metal_6 = next(d for d in defs if d.key == "MN01:Metal:6")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    m6 = CardInst(inst_id=90001, def_id=metal_6.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [m6]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    flip_card(g.state, 0, 0, 0)
+    g._drive()
+    assert m6 not in g.state.lines[0].p0_stack, (
+        "face-up Metal 6 should self-delete when flipped"
+    )
+    assert m6 in g.state.players[0].trash, (
+        "Metal 6 should land in its owner's trash after the flip-induced self-delete"
+    )
+
+
+def test_metal_6_face_down_can_be_flipped_normally():
+    """Inverse: face-DOWN Metal 6 has no active top text, so flipping it
+    face-up should NOT trigger self-delete. (The flipped-face-up card
+    sits on the field for downstream effects to interact with.)"""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import flip_card
+    g = Game(GameConfig(seed=91))
+    g.set_predetermined_draft([["Metal", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    metal_6 = next(d for d in defs if d.key == "MN01:Metal:6")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    m6 = CardInst(inst_id=91001, def_id=metal_6.def_id, owner=0, face_up=False)
+    g.state.lines[0].p0_stack = [m6]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    flip_card(g.state, 0, 0, 0)
+    g._drive()
+    # Now face-up Metal 6 on the field; no self-delete fired since the
+    # top text wasn't active during the face-down → face-up transition.
+    assert m6 in g.state.lines[0].p0_stack
+    assert m6.face_up
+
+
+def test_plague_4_end_trigger_fires_on_end_phase():
+    """Regression for playtester report: Plague 4's bottom 'End: opp
+    deletes 1 face-down. You may flip this card.' previously did
+    nothing because Plague 4 was routed via @bottom_on_play. Now via
+    @end_trigger — verify the deletion fires at end of owner's turn."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    g = Game(GameConfig(seed=92))
+    g.set_predetermined_draft([["Plague", "Death", "Water"], ["Light", "Fire", "Speed"]])
+    defs = load_card_defs()
+    plague_4 = next(d for d in defs if d.key == "MN01:Plague:4")
+    fire_0 = next(d for d in defs if d.key == "MN01:Fire:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    p4_inst = CardInst(inst_id=92001, def_id=plague_4.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [p4_inst]
+    # Opp face-down card that should be the deletion target.
+    target_card = CardInst(inst_id=92002, def_id=fire_0.def_id, owner=1, face_up=False)
+    g.state.lines[1].p1_stack = [target_card]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.current_player = 0
+    g.state.phase = Phase.END
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    # Drive end phase. Should yield a Choice with decider=opp picking
+    # which face-down to delete.
+    g._drive()
+    choice = g._pending[-1].last_choice if g._pending else None
+    assert choice is not None and choice.decider == 1, (
+        f"expected opp-decided face-down deletion prompt; got {choice}"
+    )
+    assert any("face-down" in choice.prompt.lower() for _ in [None]), (
+        f"prompt should mention face-down; got: {choice.prompt}"
+    )
+    # Pick the only target → opp's face-down deletes.
+    g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=0))
+    # Skip the optional self-flip.
+    while g._pending and g._pending[-1].last_choice is not None:
+        choice = g._pending[-1].last_choice
+        # Pick "skip" if available, else the first option.
+        skip_idx = next(
+            (i for i, t in enumerate(choice.targets) if t == -1),
+            0,
+        )
+        g.step(Action(type=ActionType.CHOOSE_TARGET, choice_index=skip_idx))
+    assert target_card not in g.state.lines[1].p1_stack, (
+        "opp's face-down should be deleted by Plague 4's End trigger"
+    )
+    assert target_card in g.state.players[1].trash
+
+
 def test_uncover_trigger_fires_when_top_card_deleted():
     """Codex p.3 "Middle Command — Immediate: Resolve this active text upon
     card play/flip/uncover." When the top card of a stack is deleted, the

@@ -245,11 +245,22 @@ export function flipCard(
 ): CardInst {
   const stack = lineStack(state.lines[lineIdx], player);
   const c = stack[stackPos];
+  const d = safeCardDef(c.defId);
   // Ice 4: "This card cannot be flipped." Persistent immunity while
   // face-up on the field. Mirrors src/compile_engine/effects.py.
-  const d = safeCardDef(c.defId);
   if (d.key === "MN02:Ice:4" && c.faceUp) {
     logInfo(state, `Flip on ${d.protocol} ${d.value} was blocked (immune).`);
+    return c;
+  }
+  // Metal 6 top: "When this card would be covered or flipped: First,
+  // delete this card." Top text is active only while face-up. We
+  // preempt here (rather than via the post-flip FLIP_TRIGGER broadcast)
+  // because (a) the trigger fires BEFORE the flip ("First, ...") and
+  // (b) the broadcast filters on c.faceUp post-flip, which would skip
+  // face-up→face-down transitions entirely. Codex p.10: the calling
+  // flip is "used up" — no alternate target.
+  if (d.key === "MN01:Metal:6" && c.faceUp) {
+    deleteCardFromField(state, lineIdx, player, stackPos);
     return c;
   }
   const wasUp = c.faceUp;
