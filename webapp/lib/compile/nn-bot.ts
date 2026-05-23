@@ -58,6 +58,7 @@ async function getSession(): Promise<ort.InferenceSession> {
 function tensorFromState(s: EncodedState): Record<string, ort.Tensor> {
   return {
     field_tokens: new ort.Tensor("int64", s.field_tokens, [1, 3, 2, 10]),
+    field_flags:  new ort.Tensor("float32", s.field_flags, [1, 3, 2, 10, 3]),
     field_meta:   new ort.Tensor("float32", s.field_meta, [1, 3, 2, 3]),
     protocols:    new ort.Tensor("int64", s.protocols, [1, 2, 3, 2]),
     hand_tokens:  new ort.Tensor("int64", s.hand_tokens, [1, 12]),
@@ -66,15 +67,20 @@ function tensorFromState(s: EncodedState): Record<string, ort.Tensor> {
     line_vals:    new ort.Tensor("float32", s.line_vals, [1, 3, 2]),
     scalars:      new ort.Tensor("float32", s.scalars, [1, 8]),
     phase:        new ort.Tensor("float32", s.phase, [1, 9]),
+    // A1: pending-choice context tensors.
+    pending_card_token: new ort.Tensor("int64", s.pending_card_token, [1]),
+    pending_category:   new ort.Tensor("float32", s.pending_category, [1, s.pending_category.length]),
+    pending_depth_norm: new ort.Tensor("float32", s.pending_depth_norm, [1, 1]),
   };
 }
 
 function tensorFromActions(a: EncodedActions, rawDim: number): Record<string, ort.Tensor> {
   return {
-    action_raw:        new ort.Tensor("float32", a.action_raw, [1, MAX_ACTIONS, rawDim]),
-    action_card_ids:   new ort.Tensor("int64", a.action_card_ids, [1, MAX_ACTIONS]),
-    action_proto_ids:  new ort.Tensor("int64", a.action_proto_ids, [1, MAX_ACTIONS]),
-    action_mask:       new ort.Tensor("bool", a.action_mask, [1, MAX_ACTIONS]),
+    action_raw:             new ort.Tensor("float32", a.action_raw, [1, MAX_ACTIONS, rawDim]),
+    action_card_ids:        new ort.Tensor("int64", a.action_card_ids, [1, MAX_ACTIONS]),
+    action_proto_ids:       new ort.Tensor("int64", a.action_proto_ids, [1, MAX_ACTIONS]),
+    action_extra_card_ids:  new ort.Tensor("int64", a.action_extra_card_ids, [1, MAX_ACTIONS]),
+    action_mask:            new ort.Tensor("bool", a.action_mask, [1, MAX_ACTIONS]),
   };
 }
 
@@ -103,19 +109,29 @@ export class NNBot implements Bot {
     const decider = game.decider() as PlayerIndex;
 
     let pendingChoice: { prompt: string; targets: unknown[] } | null = null;
+    let pendingSourceCard: import("./types").CardInst | null = null;
+    let pendingDepth = 0;
     const eng = game as unknown as {
-      pending?: { lastChoice?: { prompt: string; targets: unknown[] } | null }[];
+      pending?: {
+        lastChoice?: { prompt: string; targets: unknown[] } | null;
+        sourceCard?: import("./types").CardInst | null;
+      }[];
     };
     const pendStack = eng.pending;
     if (pendStack && pendStack.length > 0) {
+      pendingDepth = pendStack.length;
       const top = pendStack[pendStack.length - 1];
       if (top.lastChoice) {
         pendingChoice = { prompt: top.lastChoice.prompt, targets: top.lastChoice.targets };
       }
+      pendingSourceCard = top.sourceCard ?? null;
     }
 
     const enc = encodeState(state, decider, {
       pendingChoice: pendingChoice != null,
+      pendingPrompt: pendingChoice?.prompt ?? null,
+      pendingDepth,
+      pendingSourceCard,
       draftIdx: state.draftIdx,
       draftScheduleLen: state.draftSchedule.length,
       decider,

@@ -56,6 +56,10 @@ def main() -> None:
                          "still get sampled occasionally")
     ap.add_argument("--pfsp-window", type=int, default=80,
                     help="rolling window length for per-opponent win-rate")
+    ap.add_argument("--init-ckpt", type=str, default=None,
+                    help="Optional warm-start: path to a snapshot_*.pt file. "
+                         "PPO and AZ trainers share the snapshot format, so "
+                         "you can hand an AZ checkpoint to PPO here.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -79,6 +83,7 @@ def main() -> None:
         pfsp_p=args.pfsp_p,
         pfsp_min_weight=args.pfsp_min_weight,
         pfsp_window=args.pfsp_window,
+        init_ckpt=args.init_ckpt,
     )
     train(cfg)
 

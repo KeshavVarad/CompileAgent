@@ -88,6 +88,12 @@ import {
 type PendingEffect = {
   gen: EffectGen;
   lastChoice: Choice | null;
+  // The card whose middle/bottom/top/end/etc. handler produced `gen`.
+  // Python's nn-encoder introspects `gen.gi_frame.f_locals["card"]` to
+  // recover this; JS generators don't expose frame locals, so the engine
+  // attaches it explicitly here. System generators (control_rearrange,
+  // refresh, compile finalizer) leave it null.
+  sourceCard: CardInst | null;
 };
 
 export class Game {
@@ -377,12 +383,12 @@ export class Game {
     }
   }
 
-  private pushEffect(gen: EffectGen): void {
+  private pushEffect(gen: EffectGen, sourceCard: CardInst | null = null): void {
     const st = this.state;
     if (this.pending.length >= MAX_EFFECT_STACK_DEPTH) return;
     if (st.effectPushesThisTurn >= MAX_EFFECT_PUSHES_PER_TURN) return;
     st.effectPushesThisTurn++;
-    this.pending.push({ gen, lastChoice: null });
+    this.pending.push({ gen, lastChoice: null, sourceCard });
   }
 
   private fireNextTrigger(): void {
@@ -394,7 +400,7 @@ export class Game {
       if (!stack.includes(t.card) || !t.card.faceUp) return;
       if (stack.indexOf(t.card) === stack.length - 1) return; // not actually covered
       const fn = getWhenCoveredEffect(t.card.defId);
-      if (fn) this.pushEffect(fn(st, t.player, t.line, t.card));
+      if (fn) this.pushEffect(fn(st, t.player, t.line, t.card), t.card);
       return;
     }
     if (t.kind === "reveal_placeholder") {
@@ -402,7 +408,7 @@ export class Game {
       // face-up trigger can resolve. Push an effect that yields a Choice;
       // resolveChoice patches the card's defId, then the LIFO drain resumes
       // and the face_up trigger (re-pushed below) fires its real effects.
-      this.pushEffect(this.revealPlaceholderEffect(t.card, t.player, t.line));
+      this.pushEffect(this.revealPlaceholderEffect(t.card, t.player, t.line), t.card);
       st.triggers.push({ kind: "face_up", line: t.line, player: t.player, card: t.card });
       return;
     }
@@ -415,7 +421,7 @@ export class Game {
     const d = CARD_DEFS[t.card.defId];
     if (!d.middleText) return;
     const mf = getMiddleEffect(t.card.defId);
-    if (mf) this.pushEffect(mf(st, t.player, t.line, t.card));
+    if (mf) this.pushEffect(mf(st, t.player, t.line, t.card), t.card);
   }
 
   private *revealPlaceholderEffect(
@@ -448,24 +454,24 @@ export class Game {
     // Push in reverse-resolution order so LIFO drain runs top -> bottom_first -> middle.
     const d = CARD_DEFS[c.defId];
     const midFn: EffectFn | null = middleSuppressed(this.state, lineIdx, c) ? null : getMiddleEffect(c.defId);
-    if (midFn && d.middleText) this.pushEffect(midFn(this.state, ap, lineIdx, c));
+    if (midFn && d.middleText) this.pushEffect(midFn(this.state, ap, lineIdx, c), c);
     const bf = getBottomFirstEffect(c.defId);
-    if (bf) this.pushEffect(bf(this.state, ap, lineIdx, c));
+    if (bf) this.pushEffect(bf(this.state, ap, lineIdx, c), c);
     const bp = getBottomOnPlayEffect(c.defId);
-    if (bp) this.pushEffect(bp(this.state, ap, lineIdx, c));
+    if (bp) this.pushEffect(bp(this.state, ap, lineIdx, c), c);
     const tt = getTopTriggerEffect(c.defId);
-    if (tt) this.pushEffect(tt(this.state, ap, lineIdx, c));
+    if (tt) this.pushEffect(tt(this.state, ap, lineIdx, c), c);
   }
 
   enqueueEnterPlayTriggersSkipMiddle(c: CardInst, ap: PlayerIndex, lineIdx: number): void {
     // Luck 1: "Flip that card, ignoring its middle commands" — fire top and
     // bottom triggers but skip middle.
     const bf = getBottomFirstEffect(c.defId);
-    if (bf) this.pushEffect(bf(this.state, ap, lineIdx, c));
+    if (bf) this.pushEffect(bf(this.state, ap, lineIdx, c), c);
     const bp = getBottomOnPlayEffect(c.defId);
-    if (bp) this.pushEffect(bp(this.state, ap, lineIdx, c));
+    if (bp) this.pushEffect(bp(this.state, ap, lineIdx, c), c);
     const tt = getTopTriggerEffect(c.defId);
-    if (tt) this.pushEffect(tt(this.state, ap, lineIdx, c));
+    if (tt) this.pushEffect(tt(this.state, ap, lineIdx, c), c);
   }
 
   // ---------------------------------------------------------------- DRAFT
@@ -539,7 +545,7 @@ export class Game {
       for (const c of snapshot) {
         if (!c.faceUp) continue;
         const fn = getStartEffect(c.defId);
-        if (fn) { this.pushEffect(fn(st, st.currentPlayer, ln, c)); anyPushed = true; }
+        if (fn) { this.pushEffect(fn(st, st.currentPlayer, ln, c), c); anyPushed = true; }
       }
     }
     st.phase = "CHECK_CONTROL";
@@ -601,7 +607,7 @@ export class Game {
     this.pushEffect(this.compileFinalizerGen(a));
     for (let i = interrupts.length - 1; i >= 0; i--) {
       const it = interrupts[i];
-      this.pushEffect(it.fn(st, ap, ln, it.c));
+      this.pushEffect(it.fn(st, ap, ln, it.c), it.c);
     }
     if (hasControl) {
       const { controlRearrangeGen } = require("./effects");
@@ -750,18 +756,18 @@ export class Game {
     // Push enter-play effects.
     if (faceUp && d != null) {
       const midFn = middleSuppressed(st, actualLine, c) ? null : getMiddleEffect(c.defId);
-      if (midFn && d.middleText) this.pushEffect(midFn(st, player, actualLine, c));
+      if (midFn && d.middleText) this.pushEffect(midFn(st, player, actualLine, c), c);
       const bf = getBottomFirstEffect(c.defId);
-      if (bf) this.pushEffect(bf(st, player, actualLine, c));
+      if (bf) this.pushEffect(bf(st, player, actualLine, c), c);
       const bp = getBottomOnPlayEffect(c.defId);
-      if (bp) this.pushEffect(bp(st, player, actualLine, c));
+      if (bp) this.pushEffect(bp(st, player, actualLine, c), c);
       const tt = getTopTriggerEffect(c.defId);
-      if (tt) this.pushEffect(tt(st, player, actualLine, c));
+      if (tt) this.pushEffect(tt(st, player, actualLine, c), c);
     }
     this.pushEffect(uncommitSentinel(c));
     if (soonCovered && soonCovered.faceUp) {
       const wc = getWhenCoveredEffect(soonCovered.defId);
-      if (wc) this.pushEffect(wc(st, soonCovered.owner, actualLine, soonCovered));
+      if (wc) this.pushEffect(wc(st, soonCovered.owner, actualLine, soonCovered), soonCovered);
     }
     // Diversity 6 continuous check (a fresh play may bring its own protocol
     // count up to/keep at 3, but Diversity 6 itself entering a sub-3 field
@@ -796,7 +802,7 @@ export class Game {
       for (const c of [...lineStack(st.lines[ln], owner)]) {
         if (!c.faceUp || c.defId === -1) continue;
         const fn = getter(c.defId);
-        if (fn) { this.pushEffect(fn(st, owner, ln, c)); pushed = true; }
+        if (fn) { this.pushEffect(fn(st, owner, ln, c), c); pushed = true; }
       }
     }
     return pushed;
@@ -812,7 +818,7 @@ export class Game {
     for (const c of [...lineStack(st.lines[line], owner)]) {
       if (!c.faceUp || c.defId === -1) continue;
       const fn = getter(c.defId);
-      if (fn) { this.pushEffect(fn(st, owner, line, c)); pushed = true; }
+      if (fn) { this.pushEffect(fn(st, owner, line, c), c); pushed = true; }
     }
     return pushed;
   }
@@ -893,7 +899,7 @@ export class Game {
             const s = lineStack(st.lines[ln], pl);
             if (s.includes(c) && c.faceUp) {
               const fn = getFlipTriggerEffect(c.defId);
-              if (fn) { this.pushEffect(fn(st, pl, ln, c)); pushedAny = true; }
+              if (fn) { this.pushEffect(fn(st, pl, ln, c), c); pushedAny = true; }
               break;
             }
           }
@@ -926,7 +932,7 @@ export class Game {
         for (const c of snapshot) {
           if (!c.faceUp) continue;
           const fn = getEndEffect(c.defId);
-          if (fn) { this.pushEffect(fn(st, ap, ln, c)); anyPushed = true; }
+          if (fn) { this.pushEffect(fn(st, ap, ln, c), c); anyPushed = true; }
         }
       }
       if (anyPushed) {
