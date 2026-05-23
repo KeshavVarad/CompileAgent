@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,9 @@ type EvalEntry = {
   bot: Action;
   value: number;
   topProbabilities: { actionIndex: number; prob: number; action: Action }[];
+  actualProb: number;
+  actualRank: number;
+  topProb: number;
   agree: boolean;
 };
 
@@ -32,6 +35,11 @@ type EvalResponse = {
     avgBotValue: number;
     finalWinner: 0 | 1 | null;
   };
+  /** Set on cached GET responses; absent on a fresh POST. */
+  actionCount?: number;
+  currentActionCount?: number;
+  stale?: boolean;
+  computedAt?: string;
 };
 
 function describeAction(a: Action): string {
@@ -54,12 +62,66 @@ function valueBar(v: number): { tone: string; pct: number } {
   return { tone, pct };
 }
 
+/**
+ * Classify the user's move relative to the bot's policy. The bot is
+ * stochastic — many decisions have multiple reasonable answers — so we
+ * avoid binary "right/wrong" framing and instead say where the user's
+ * choice sat in the model's distribution.
+ *
+ * - `top` (prob in the top 25% of mass with rank 0): the model's modal pick
+ * - `reasonable` (rank 0-2 OR prob ≥ 15%): a co-favored option
+ * - `unusual` (prob 1-15%): the model would have considered something else
+ * - `rare` (prob < 1%): a clearly off-policy line; the most likely "blunder" signal
+ */
+function classifyMove(e: EvalEntry): { kind: "top" | "reasonable" | "unusual" | "rare"; label: string; tone: string } {
+  if (e.agree) return { kind: "top", label: "model's top pick", tone: "text-emerald-400" };
+  if (e.actualRank >= 0 && e.actualRank <= 2 && e.actualProb >= 0.15)
+    return { kind: "reasonable", label: "co-favored", tone: "text-emerald-300/80" };
+  if (e.actualProb >= 0.05)
+    return { kind: "unusual", label: "lower-probability", tone: "text-amber-400" };
+  return { kind: "rare", label: "off-policy", tone: "text-red-400" };
+}
+
+function timeAgo(iso?: string): string | null {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  const ms = Date.now() - then;
+  if (ms < 0) return "just now";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
+}
+
 export function EvalDialog({ gameId }: { gameId: string }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<EvalResponse | null>(null);
+  // Tracks whether the result on screen came from cache (GET) vs a fresh
+  // recompute (POST). Affects the "last reviewed: …" affordance.
+  const [fromCache, setFromCache] = useState(false);
 
-  const run = useCallback(async () => {
+  const loadCached = useCallback(async (): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/games/${gameId}/eval`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      if (res.status === 204) return false;
+      if (!res.ok) return false;
+      const data: EvalResponse = await res.json();
+      setResult(data);
+      setFromCache(true);
+      return true;
+    } catch {
+      return false;
+    }
+  }, [gameId]);
+
+  const recompute = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch(`/api/games/${gameId}/eval`, {
@@ -74,6 +136,7 @@ export function EvalDialog({ gameId }: { gameId: string }) {
       }
       const data: EvalResponse = await res.json();
       setResult(data);
+      setFromCache(false);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Eval failed");
     } finally {
@@ -81,23 +144,36 @@ export function EvalDialog({ gameId }: { gameId: string }) {
     }
   }, [gameId]);
 
-  function openDialog() {
-    setOpen(true);
-    if (!result) void run();
-  }
+  // On open: prefer cached. If none, kick off a fresh compute.
+  useEffect(() => {
+    if (!open || result || loading) return;
+    void (async () => {
+      const had = await loadCached();
+      if (!had) await recompute();
+    })();
+  }, [open, result, loading, loadCached, recompute]);
 
   return (
     <>
-      <Button variant="outline" size="sm" onClick={openDialog} className="text-[11px]">
-        AI eval (vs {CURRENT_BOT.displayLabel})
+      <Button variant="outline" size="sm" onClick={() => setOpen(true)} className="text-[11px]">
+        AI review (vs {CURRENT_BOT.displayLabel})
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="sm:max-w-[860px] max-h-[88vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>AI review</DialogTitle>
-            <DialogDescription>
-              {CURRENT_BOT.displayLabel} re-played every decision you made from your seat
-              and shows what it would have done instead.
+            <DialogDescription className="space-y-1">
+              <span className="block">
+                {CURRENT_BOT.displayLabel} re-played each of your decisions from your seat
+                and reports the policy distribution over the legal moves.
+              </span>
+              <span className="block text-amber-400/90 text-[11px]">
+                Heads-up: the model's policy is <strong>stochastic</strong> — for many
+                decisions multiple options are reasonable. A move flagged as
+                &ldquo;lower-probability&rdquo; or &ldquo;off-policy&rdquo; is the model's
+                read, not a verdict. Sparkv3 is a strong amateur, not an oracle, and is
+                still wrong on plenty of positions.
+              </span>
             </DialogDescription>
           </DialogHeader>
 
@@ -109,7 +185,16 @@ export function EvalDialog({ gameId }: { gameId: string }) {
 
           {!loading && result && (
             <>
-              <SummaryRow result={result} />
+              <SummaryRow result={result} fromCache={fromCache} />
+              {result.stale && (
+                <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px]">
+                  This review was computed when the game had{" "}
+                  <span className="font-mono">{result.actionCount}</span> actions; it now
+                  has <span className="font-mono">{result.currentActionCount}</span>.
+                  Click <span className="font-semibold">re-run</span> below for an updated
+                  review of the latest moves.
+                </div>
+              )}
               <div className="space-y-2 mt-2">
                 {result.entries.length === 0 ? (
                   <div className="text-sm text-muted-foreground py-4">
@@ -119,8 +204,15 @@ export function EvalDialog({ gameId }: { gameId: string }) {
                   result.entries.map((e) => <EvalRow key={e.step} entry={e} />)
                 )}
               </div>
-              <div className="mt-4 flex justify-end">
-                <Button variant="ghost" size="sm" onClick={() => { setResult(null); void run(); }}>
+              <div className="mt-4 flex items-center justify-between gap-3">
+                <span className="text-[11px] text-muted-foreground">
+                  {fromCache && result.computedAt ? (
+                    <>last reviewed {timeAgo(result.computedAt)}</>
+                  ) : (
+                    "fresh review"
+                  )}
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => void recompute()}>
                   re-run
                 </Button>
               </div>
@@ -132,26 +224,35 @@ export function EvalDialog({ gameId }: { gameId: string }) {
   );
 }
 
-function SummaryRow({ result }: { result: EvalResponse }) {
+function SummaryRow({ result, fromCache }: { result: EvalResponse; fromCache: boolean }) {
   const { summary } = result;
   const bar = valueBar(summary.avgBotValue);
   return (
     <div className="rounded-lg border bg-card/50 px-3 py-2 grid grid-cols-3 gap-3 text-xs font-mono">
       <div>
-        <div className="text-muted-foreground">decisions</div>
+        <div className="text-muted-foreground">decisions reviewed</div>
         <div className="text-lg font-semibold">{summary.decisions}</div>
+        {fromCache && (
+          <div className="text-[9px] text-muted-foreground/60">cached</div>
+        )}
       </div>
       <div>
-        <div className="text-muted-foreground">agreement with bot</div>
+        <div className="text-muted-foreground">picks matching model's mode</div>
         <div className="text-lg font-semibold">{(summary.agreementRate * 100).toFixed(0)}%</div>
+        <div className="text-[9px] text-muted-foreground/60">
+          modal agreement, not correctness
+        </div>
       </div>
       <div>
-        <div className="text-muted-foreground">avg bot value</div>
+        <div className="text-muted-foreground">avg model value (your seat)</div>
         <div className="flex items-center gap-2">
           <div className="flex-1 h-2 rounded bg-muted/40 overflow-hidden">
             <div className={`${bar.tone} h-full`} style={{ width: `${bar.pct}%` }} />
           </div>
           <span className="text-[11px]">{summary.avgBotValue.toFixed(2)}</span>
+        </div>
+        <div className="text-[9px] text-muted-foreground/60">
+          range −1 (losing) … +1 (winning)
         </div>
       </div>
     </div>
@@ -160,19 +261,31 @@ function SummaryRow({ result }: { result: EvalResponse }) {
 
 function EvalRow({ entry }: { entry: EvalEntry }) {
   const bar = valueBar(entry.value);
+  const verdict = classifyMove(entry);
+  const borderTone =
+    verdict.kind === "top" ? "border-emerald-500/30"
+      : verdict.kind === "reasonable" ? "border-emerald-300/20"
+      : verdict.kind === "unusual" ? "border-amber-500/30"
+      : "border-red-500/30";
   return (
-    <div className={`rounded border px-3 py-2 text-xs ${entry.agree ? "border-emerald-500/30" : "border-amber-500/30"}`}>
+    <div className={`rounded border px-3 py-2 text-xs ${borderTone}`}>
       <div className="flex items-center justify-between text-[10px] font-mono text-muted-foreground">
         <span>step {entry.step} · turn {entry.turn} · {entry.phase.toLowerCase().replace("_", " ")}</span>
-        <span>{entry.agree ? "✓ matches bot" : "△ differs"}</span>
+        <span className={verdict.tone}>{verdict.label}</span>
       </div>
       <div className="mt-1 grid grid-cols-[1fr_1fr] gap-2">
         <div>
-          <div className="text-[10px] text-muted-foreground">you</div>
+          <div className="text-[10px] text-muted-foreground">
+            you played{" "}
+            <span className="font-mono">({(entry.actualProb * 100).toFixed(1)}% model prob)</span>
+          </div>
           <div className="text-sm">{describeAction(entry.actual)}</div>
         </div>
         <div>
-          <div className="text-[10px] text-muted-foreground">bot suggested</div>
+          <div className="text-[10px] text-muted-foreground">
+            model's top pick{" "}
+            <span className="font-mono">({(entry.topProb * 100).toFixed(1)}%)</span>
+          </div>
           <div className="text-sm">{describeAction(entry.bot)}</div>
         </div>
       </div>
@@ -186,10 +299,10 @@ function EvalRow({ entry }: { entry: EvalEntry }) {
       </div>
       {!entry.agree && entry.topProbabilities.length > 0 && (
         <div className="mt-2 text-[10px] text-muted-foreground">
-          top picks:{" "}
-          {entry.topProbabilities.slice(0, 3).map((t, i) => (
+          full top-k:{" "}
+          {entry.topProbabilities.slice(0, 4).map((t, i) => (
             <span key={i} className="font-mono">
-              {describeAction(t.action)} ({(t.prob * 100).toFixed(0)}%){i < 2 ? " · " : ""}
+              {describeAction(t.action)} <span className="text-muted-foreground/60">({(t.prob * 100).toFixed(0)}%)</span>{i < 3 ? " · " : ""}
             </span>
           ))}
         </div>

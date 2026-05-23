@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { CARD_OVERLAP_PX, PlayCard } from "@/components/play-card";
+import { BugReportDialog } from "@/components/bug-report-dialog";
 import { DeleteGameButton } from "@/components/delete-game-button";
 import { EvalDialog } from "@/components/eval-dialog";
 import { defsForProtocol, type Protocol } from "@/lib/compile/cards";
@@ -503,13 +504,16 @@ export function GameClient({ gameId, initialView, initialTotalActions }: Props) 
       )}
 
       {!view.draft && (
-        <div className="mt-3 flex justify-between items-center">
+        <div className="mt-3 flex justify-between items-center gap-2 flex-wrap">
           <DeleteGameButton
             gameId={gameId}
             variant="page"
             onDeleted={() => { window.location.href = "/"; }}
           />
-          <EvalDialog gameId={gameId} />
+          <div className="flex items-center gap-2">
+            <BugReportDialog view={view} gameId={gameId} />
+            <EvalDialog gameId={gameId} />
+          </div>
         </div>
       )}
 

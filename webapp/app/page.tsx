@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { desc, eq } from "drizzle-orm";
 
+import { BugReportDialog } from "@/components/bug-report-dialog";
 import { DeleteGameButton } from "@/components/delete-game-button";
 import { LogoutButton } from "@/components/logout-button";
 import { NewGameDialog } from "@/components/new-game-dialog";
@@ -145,7 +146,7 @@ export default async function Home() {
         )}
       </section>
 
-      <footer className="mt-16 text-xs text-muted-foreground font-mono flex items-center gap-4">
+      <footer className="mt-16 text-xs text-muted-foreground font-mono flex items-center gap-4 flex-wrap">
         <span>compile-recorder · v0.1</span>
         <Separator orientation="vertical" className="h-3" />
         <Link href="/" className="hover:text-foreground">home</Link>
@@ -155,6 +156,8 @@ export default async function Home() {
         <Link href="https://shop.greaterthangames.com/pages/compile" target="_blank" className="hover:text-foreground">
           game rules ↗
         </Link>
+        <Separator orientation="vertical" className="h-3" />
+        <BugReportDialog triggerClassName="text-[11px] h-7" />
       </footer>
     </div>
   );
