@@ -45,7 +45,7 @@ export default async function Home() {
   const games = await recentGames(session.userId).catch(() => []);
 
   return (
-    <div className="flex-1 mx-auto w-full max-w-6xl px-6 py-12">
+    <div className="flex-1 mx-auto w-full max-w-[min(96rem,92vw)] px-6 py-12">
       <header className="flex items-end justify-between mb-10">
         <div>
           <div className="text-xs text-muted-foreground uppercase tracking-widest font-mono">

@@ -11,7 +11,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
-import { CARD_OVERLAP_PX, PlayCard } from "@/components/play-card";
+import { CARD_OVERLAP_HEIGHT, PlayCard } from "@/components/play-card";
 import { BugReportDialog } from "@/components/bug-report-dialog";
 import { DeleteGameButton } from "@/components/delete-game-button";
 import { EvalDialog } from "@/components/eval-dialog";
@@ -397,7 +397,7 @@ export function GameClient({ gameId, initialView, initialTotalActions }: Props) 
   const canEnterAnalysis = !animating && !pending && totalActions > 0;
 
   return (
-    <div className="flex-1 mx-auto w-full max-w-6xl px-6 py-6">
+    <div className="flex-1 mx-auto w-full max-w-[min(96rem,92vw)] px-6 py-6">
       <TopBar
         view={view}
         analysisOpen={inAnalysis}
@@ -965,7 +965,7 @@ function Stack({
               // card's M + B + footer (the bottom 112px of the previous
               // card). The previous card's header + top tier stays
               // exposed above this card.
-              marginTop: stackIdx === 0 ? 0 : -CARD_OVERLAP_PX,
+              marginTop: stackIdx === 0 ? 0 : `-${CARD_OVERLAP_HEIGHT}`,
               // Later cards in front so their full body shows and the
               // overlap region hides the older card's bottom tiers.
               zIndex: 10 + stackIdx,
