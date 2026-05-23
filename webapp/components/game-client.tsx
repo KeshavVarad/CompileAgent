@@ -1240,8 +1240,11 @@ function IdentityPickerDialog({
               value: d.value,
               faceUp: true,
               isCommitted: false,
+              topEmphasis: d.topEmphasis,
               topText: d.topText,
+              middleEmphasis: d.middleEmphasis,
               middleText: d.middleText,
+              bottomEmphasis: d.bottomEmphasis,
               bottomText: d.bottomText,
             };
             return (

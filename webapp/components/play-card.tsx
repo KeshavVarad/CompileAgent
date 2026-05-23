@@ -76,8 +76,10 @@ export function PlayCard({
   // Both T and B highlights surface persistent effects "on the part of
   // the card where the effect lives" so the player can scan the field
   // and see what's still in play.
-  const tHighlighted = variant === "board" && !isBoardFaceDown && !!card.topText;
-  const bHighlighted = variant === "board" && !isBoardFaceDown && uncovered && !!card.bottomText;
+  const hasTop = !!card.topText || !!card.topEmphasis;
+  const hasBottom = !!card.bottomText || !!card.bottomEmphasis;
+  const tHighlighted = variant === "board" && !isBoardFaceDown && hasTop;
+  const bHighlighted = variant === "board" && !isBoardFaceDown && uncovered && hasBottom;
 
   return (
     <div
@@ -122,24 +124,27 @@ export function PlayCard({
           {headerValue}
         </span>
       </div>
-      <CardTier label="T" text={card.topText} active={tHighlighted} faceDown={isBoardFaceDown} />
-      <CardTier label="M" text={card.middleText} active={false} faceDown={isBoardFaceDown} />
-      <CardTier label="B" text={card.bottomText} active={bHighlighted} faceDown={isBoardFaceDown} />
+      <CardTier label="T" emphasis={card.topEmphasis} text={card.topText} active={tHighlighted} faceDown={isBoardFaceDown} />
+      <CardTier label="M" emphasis={card.middleEmphasis} text={card.middleText} active={false} faceDown={isBoardFaceDown} />
+      <CardTier label="B" emphasis={card.bottomEmphasis} text={card.bottomText} active={bHighlighted} faceDown={isBoardFaceDown} />
     </div>
   );
 }
 
 function CardTier({
   label,
+  emphasis,
   text,
   active,
   faceDown,
 }: {
   label: "T" | "M" | "B";
+  emphasis: string;
   text: string;
   active: boolean;
   faceDown: boolean;
 }) {
+  const hasContent = !!emphasis || !!text;
   return (
     <div
       className={cn(
@@ -159,8 +164,18 @@ function CardTier({
         </span>
         {faceDown ? (
           <span className="text-muted-foreground/40">—</span>
-        ) : text ? (
-          <span className="text-foreground/85 line-clamp-3">{text}</span>
+        ) : hasContent ? (
+          // Emphasis ("Start:", "End:", "When covered:", etc.) is the
+          // Codex-specified trigger label. Render it inline as a bolded
+          // prefix so the line-clamp-3 budget is shared with the prose
+          // and players can tell trigger from effect at a glance.
+          <span className="line-clamp-3 text-foreground/85">
+            {emphasis && (
+              <span className="font-semibold text-amber-200/90">{emphasis}</span>
+            )}
+            {emphasis && text ? " " : ""}
+            {text}
+          </span>
         ) : (
           <span className="text-muted-foreground/40">—</span>
         )}

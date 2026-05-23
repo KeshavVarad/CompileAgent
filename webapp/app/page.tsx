@@ -150,6 +150,7 @@ export default async function Home() {
         <span>compile-recorder · v0.1</span>
         <Separator orientation="vertical" className="h-3" />
         <Link href="/" className="hover:text-foreground">home</Link>
+        <Link href="/cards" className="hover:text-foreground">cards</Link>
         <Link href="https://github.com/KeshavVarad/CompileAgent" target="_blank" className="hover:text-foreground">
           source ↗
         </Link>
