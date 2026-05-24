@@ -80,7 +80,32 @@ class TrainConfig:
     # rejected 47/47 times — a credit-assignment-starved local optimum that
     # more entropy on CHOOSE should help break). Order matches
     # ACTION_CLASS_NAMES: (DRAFT, PLAY, CHOOSE, COMPILE, DISCARD, SHIFT).
+    # These are the STARTING values; per-class adaptive control (below)
+    # adjusts them each iter to keep per-class entropy in a target band.
     per_class_entropy_mult: tuple[float, ...] = (4.0, 1.0, 2.0, 1.0, 1.0, 1.0)
+    # Per-class adaptive entropy control. Mirrors the global
+    # entropy_floor/ceiling system but operates on per-class entropy
+    # (e.g. DRAFT entropy) with per-class multipliers. Necessary
+    # because the previous run (runs/20260524-023022-ppo-entropy-aux)
+    # showed runaway DRAFT exploration past iter 50: with a constant
+    # multiplier, once DRAFT entropy crossed ~1.5 nats a positive feedback
+    # loop pushed it toward uniform (2.46 nats by iter 60), destroying
+    # the play policy structure that depended on Darkness-line tactics.
+    # Floor of None = "no adaptive control on this class, leave the
+    # multiplier at the starting value." For DRAFT we target 0.8-1.4 nats:
+    # diverse enough to break mode collapse but not uniform-over-pool.
+    # For CHOOSE 0.5-1.0 nats: enough entropy to explore optional
+    # clauses without scrambling target selection. Order matches
+    # ACTION_CLASS_NAMES.
+    per_class_entropy_floor: tuple[float | None, ...] = (
+        0.8, None, 0.5, None, None, None,
+    )
+    per_class_entropy_ceiling: tuple[float | None, ...] = (
+        1.4, None, 1.0, None, None, None,
+    )
+    per_class_entropy_step: float = 1.15
+    per_class_entropy_mult_min: float = 0.5
+    per_class_entropy_mult_max: float = 10.0
     # UNREAL-style auxiliary losses on the shared trunk. These don't bias
     # the policy directly — they only give the encoder richer training
     # signal (predict opponent's hidden hand contents + final compile
@@ -526,17 +551,25 @@ def ppo_update(
 
 
 class _ConfigWithEntropy:
-    """Thin proxy that exposes the same fields as TrainConfig but with a
-    per-iter c_entropy override. Lets ppo_update stay pure (no mutation of
-    the user's TrainConfig)."""
+    """Thin proxy that exposes the same fields as TrainConfig but with
+    per-iter overrides for c_entropy + per_class_entropy_mult. Lets
+    ppo_update stay pure (no mutation of the user's TrainConfig)."""
 
-    def __init__(self, base: TrainConfig, c_entropy: float) -> None:
+    def __init__(
+        self,
+        base: TrainConfig,
+        c_entropy: float,
+        per_class_entropy_mult: tuple[float, ...] | None = None,
+    ) -> None:
         self._base = base
         self._c_entropy = c_entropy
+        self._per_class_entropy_mult = per_class_entropy_mult
 
     def __getattr__(self, name: str):
         if name == "c_entropy":
             return self._c_entropy
+        if name == "per_class_entropy_mult" and self._per_class_entropy_mult is not None:
+            return self._per_class_entropy_mult
         return getattr(self._base, name)
 
 
@@ -555,6 +588,37 @@ def _adapt_c_entropy(cfg: TrainConfig, current: float, measured_entropy: float) 
     elif measured_entropy > cfg.entropy_ceiling:
         current /= cfg.c_entropy_step
     return max(cfg.c_entropy_min, min(cfg.c_entropy_max, current))
+
+
+def _adapt_per_class_mult(
+    cfg: TrainConfig,
+    current: tuple[float, ...],
+    ent_by_class: dict[str, float],
+) -> tuple[float, ...]:
+    """Per-class analogue of _adapt_c_entropy.
+
+    For each class with a configured (floor, ceiling), adjust its
+    multiplier toward keeping that class's mean entropy in the band.
+    Classes with floor=None keep their starting multiplier untouched.
+    """
+    new_mults = list(current)
+    for cls in range(N_ACTION_CLASSES):
+        floor = cfg.per_class_entropy_floor[cls]
+        ceiling = cfg.per_class_entropy_ceiling[cls]
+        if floor is None or ceiling is None:
+            continue
+        ent = ent_by_class.get(ACTION_CLASS_NAMES[cls], float("nan"))
+        if ent != ent:  # NaN ⇒ class wasn't sampled this iter
+            continue
+        if ent < floor:
+            new_mults[cls] *= cfg.per_class_entropy_step
+        elif ent > ceiling:
+            new_mults[cls] /= cfg.per_class_entropy_step
+        new_mults[cls] = max(
+            cfg.per_class_entropy_mult_min,
+            min(cfg.per_class_entropy_mult_max, new_mults[cls]),
+        )
+    return tuple(new_mults)
 
 
 def _resolve_device(name: str) -> torch.device:
@@ -602,6 +666,12 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
     # point and scale it toward the floor/ceiling band each iter. (Held in
     # a local var so the cfg object stays immutable for reproducibility.)
     c_entropy = cfg.c_entropy
+    # Same for per-class multipliers: starting values from cfg, adapted
+    # each iter based on per-class entropy measured in the previous PPO
+    # update. Without this, the previous run let DRAFT entropy run from
+    # ~1.25 to ~2.46 nats (near-uniform over the draft pool) between
+    # iter 50 and 60, destroying the play policy.
+    per_class_mult = tuple(cfg.per_class_entropy_mult)
 
     # Opponent pool starts with light baselines (anchors are exempt from
     # eviction); snapshots get added every snapshot_every.
@@ -658,10 +728,13 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
         # The decision is based on the entropy we measured at the *end* of
         # the previous iter (kept in stats); for the first iter we leave
         # the configured start value alone.
-        cfg_for_update = _ConfigWithEntropy(cfg, c_entropy)
+        cfg_for_update = _ConfigWithEntropy(cfg, c_entropy, per_class_mult)
         batch = stack_batch(all_records, device)
         stats = ppo_update(model, optimiser, batch, cfg_for_update, np_rng)
         c_entropy = _adapt_c_entropy(cfg, c_entropy, stats["entropy"])
+        per_class_mult = _adapt_per_class_mult(
+            cfg, per_class_mult, stats.get("entropy_by_class", {}),
+        )
         dt = time.perf_counter() - t0
 
         # Per-class entropy line (only show classes that appeared this iter
@@ -673,6 +746,13 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             for name in ACTION_CLASS_NAMES
             if count_by_class.get(name, 0) > 0
         ]
+        # Per-class multipliers — show only adapted classes (those with a
+        # floor configured) so the log doesn't get cluttered with 1.0s.
+        mult_parts = [
+            f"{ACTION_CLASS_NAMES[cls]}={per_class_mult[cls]:.2f}"
+            for cls in range(N_ACTION_CLASSES)
+            if cfg.per_class_entropy_floor[cls] is not None
+        ]
         msg = (
             f"[iter {it:4d}] games={cfg.games_per_iter} trans={len(all_records)} "
             f"rollout_wr={rollout_wr:.2f} "
@@ -680,6 +760,7 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             f"ent={stats['entropy']:.3f} c_ent={c_entropy:.4f} kl={stats['approx_kl']:.4f} "
             f"aux_oh={stats['aux_opp_hand_loss']:.3f} aux_m={stats['aux_margin_loss']:.3f} "
             f"ent_by_cls=[{' '.join(ent_parts)}] "
+            f"mult=[{' '.join(mult_parts)}] "
             f"stop@ep={stats['stopped_at_epoch']} dt={dt:.1f}s"
         )
         print(msg)
@@ -702,6 +783,10 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             "aux_opp_hand_loss": stats.get("aux_opp_hand_loss", 0.0),
             "aux_margin_loss": stats.get("aux_margin_loss", 0.0),
             "c_entropy": c_entropy,
+            "per_class_entropy_mult": {
+                name: per_class_mult[i]
+                for i, name in enumerate(ACTION_CLASS_NAMES)
+            },
             "approx_kl": stats["approx_kl"],
             "stopped_at_epoch": stats["stopped_at_epoch"],
             "dt": dt,
