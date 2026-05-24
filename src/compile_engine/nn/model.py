@@ -157,6 +157,25 @@ class PolicyValueNet(nn.Module):
         nn.init.normal_(self.aux_margin_head[-1].weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.aux_margin_head[-1].bias)
 
+        # Per-action Q-head. Same input as the policy head (state hidden
+        # ⊗ per-action embedding) but outputs a scalar action-value per
+        # action instead of a logit. Used at inference for CHOOSE_TARGET
+        # decisions where argmax(Q) over a small action set (2-8 options,
+        # bounded effect-resolution context) is the better choice
+        # criterion than softmax-sampling from policy logits — see PGQL
+        # (O'Donoghue et al. 2017) and KLQ (2025).
+        #
+        # The head is action-conditioned: q = small_mlp(state_hidden ‖
+        # action_hidden), summed over the hidden dim like the policy
+        # logit but with its own MLP projection. Trained on TD(0)-style
+        # target Q*(s, a) ≈ ret, where `ret` is the GAE-derived return
+        # already computed for the value head — no extra bootstrap pass
+        # needed. See ppo_update.
+        self.q_head_state_proj = nn.Linear(hidden, hidden, bias=False)
+        self.q_head_action_proj = nn.Linear(hidden, hidden, bias=False)
+        nn.init.normal_(self.q_head_state_proj.weight, mean=0.0, std=0.01)
+        nn.init.normal_(self.q_head_action_proj.weight, mean=0.0, std=0.01)
+
     def lookup_card(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Card token → (learned embedding ‖ static features). Static features
         for PAD (0) and HIDDEN (1) are zeros, so they contribute nothing."""
@@ -257,17 +276,21 @@ class PolicyValueNet(nn.Module):
         action_mask: torch.Tensor,
         *,
         return_aux: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
-        """Returns (logits, value), or (logits, value, aux) when return_aux=True.
+        return_q: bool = False,
+    ) -> tuple:
+        """Returns (logits, value) by default.
 
-        logits: [B, MAX_ACTIONS] — masked (padded entries set to -1e9).
-        value:  [B]              — scalar in [-1, +1].
-        aux:    dict with
-                  "opp_hand_logits": [B, CARD_VOCAB_SIZE] — logits for the
-                    auxiliary "predict opponent's hand contents" supervised
-                    head. Used only at training time; produces no behaviour.
-                  "margin": [B] — auxiliary regression of the final
-                    (agent_compiles − opp_compiles) signed margin.
+        Optional extras (appended to the tuple in order when requested):
+          - return_q=True  → also returns q_values: [B, MAX_ACTIONS]
+                              (masked the same way as logits)
+          - return_aux=True → also returns aux: dict with
+              "opp_hand_logits": [B, CARD_VOCAB_SIZE] — supervised
+                "predict opp's hand contents" head
+              "margin":         [B] — supervised regression of final
+                (agent_compiles − opp_compiles) signed margin
+
+        Tuple ordering: (logits, value, [q_values], [aux]). Callers that
+        want neither extra are unchanged from the pre-Q-head signature.
         """
         dense = self.encode_state_dense(state_batch)
         h = self.state_ln(self.state_trunk(dense))         # [B, hidden]
@@ -280,10 +303,20 @@ class PolicyValueNet(nn.Module):
         logits = logits.masked_fill(~action_mask, -1e9)
 
         value = self.value_head(h).squeeze(-1)              # [B]
-        if not return_aux:
-            return logits, value
-        aux = {
-            "opp_hand_logits": self.aux_opp_hand_head(h),    # [B, CARD_VOCAB_SIZE]
-            "margin": self.aux_margin_head(h).squeeze(-1),   # [B]
-        }
-        return logits, value, aux
+
+        out: tuple = (logits, value)
+        if return_q:
+            # Q-head: per-action scalar Q-value, shape [B, MAX_ACTIONS],
+            # masked the same way as policy logits.
+            h_s = self.q_head_state_proj(h)                # [B, hidden]
+            h_a = self.q_head_action_proj(a_h)             # [B, MAX_ACTIONS, hidden]
+            q_values = torch.einsum("bh,bah->ba", h_s, h_a)
+            q_values = q_values.masked_fill(~action_mask, -1e9)
+            out = out + (q_values,)
+        if return_aux:
+            aux = {
+                "opp_hand_logits": self.aux_opp_hand_head(h),
+                "margin": self.aux_margin_head(h).squeeze(-1),
+            }
+            out = out + (aux,)
+        return out

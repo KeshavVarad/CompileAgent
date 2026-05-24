@@ -37,6 +37,7 @@ from _lib import (  # noqa: E402
     GameSummary,
     OpponentSpec,
     build_agent,
+    checkpoint_has_q_head,
     load_model_from_ckpt,
     make_game_config,
     resolve_device,
@@ -186,7 +187,9 @@ def main() -> None:
     defs = load_card_defs()
 
     model = load_model_from_ckpt(args.model, device)
-    agent = NNAgent(model, device=device, stochastic=args.stochastic)
+    use_q = checkpoint_has_q_head(args.model)
+    agent = NNAgent(model, device=device, stochastic=args.stochastic,
+                    q_for_choose_target=use_q)
     opp_spec = OpponentSpec.parse(args.opp)
     opp = build_agent(opp_spec, device, seed=args.seed + 1, stochastic=args.stochastic)
 

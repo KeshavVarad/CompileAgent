@@ -113,6 +113,12 @@ class TrainConfig:
     # supervised aux objective doesn't drown out RL gradients.
     c_aux_opp_hand: float = 0.05      # 0 disables the aux head
     c_aux_margin: float = 0.05
+    # Q-head loss coefficient. Trained on TD(0)-style target Q*(s, a) ≈
+    # ret (the GAE return already computed for the value head). When 0,
+    # the Q-head is computed in the model but never receives gradient —
+    # functionally disabled. Used at inference for CHOOSE_TARGET argmax
+    # routing; see NNAgent.q_for_choose_target.
+    c_q: float = 0.5
     snapshot_every: int = 10
     eval_games: int = 60
     # Snapshots are always checkpointed to disk. With PFSP sampling weak
@@ -289,7 +295,13 @@ def play_episode(
     agent_seat = rng.randint(0, 1)
     opp_seat = 1 - agent_seat
     records: list[StepRecord] = []
-    agent = NNAgent(model, device=device, stochastic=True, record=records)
+    # Training rollout agent: stochastic policy, Q-head OFF for CHOOSE_TARGET.
+    # If we routed CHOOSE through argmax(Q) during rollouts, the policy
+    # head would never get gradient signal on its CHOOSE logits — the
+    # entropy term would still be active but the action selection wouldn't
+    # reflect the policy distribution, breaking PPO's importance ratio.
+    agent = NNAgent(model, device=device, stochastic=True, record=records,
+                    q_for_choose_target=False)
     cfg_game = _make_config(rng, cfg)
     game = Game(cfg_game)
     game.start()
@@ -360,7 +372,12 @@ def evaluate(
     determinism.
     """
     rng = random.Random(seed)
-    agent = NNAgent(model, device=device, stochastic=True)
+    # Training-time eval — use Q-head argmax for CHOOSE_TARGET to match
+    # deployed-inference behavior. wr_random / wr_greedy in the log are
+    # now "what the model would actually score at inference," not "what
+    # the rollout-time stochastic policy scores."
+    agent = NNAgent(model, device=device, stochastic=True,
+                    q_for_choose_target=True)
     wins = {0: 0, 1: 0, None: 0}
     agent_wins = 0
     for i in range(n_games):
@@ -406,6 +423,7 @@ def ppo_update(
     stats = {
         "pg_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
         "aux_opp_hand_loss": 0.0, "aux_margin_loss": 0.0,
+        "q_loss": 0.0,
         "approx_kl": 0.0, "n": 0, "stopped_at_epoch": cfg.ppo_epochs,
     }
     # Per-class entropy bookkeeping (summed numerator + summed weight per
@@ -422,20 +440,22 @@ def ppo_update(
         device=batch.action_idx.device,
     )
     aux_enabled = (cfg.c_aux_opp_hand > 0.0) or (cfg.c_aux_margin > 0.0)
+    q_enabled = cfg.c_q > 0.0
 
     stop_early = False
     for epoch in range(cfg.ppo_epochs):
         for mb in minibatches(batch, cfg.batch_size, rng):
-            if aux_enabled:
-                logits, value, aux = model(
-                    mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids,
-                    mb.action_extra_card_ids, mb.action_mask, return_aux=True,
-                )
-            else:
-                logits, value = model(
-                    mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids,
-                    mb.action_extra_card_ids, mb.action_mask,
-                )
+            # Single forward pass with the heads we need this update.
+            out = model(
+                mb.state, mb.action_raw, mb.action_card_ids,
+                mb.action_proto_ids, mb.action_extra_card_ids, mb.action_mask,
+                return_q=q_enabled, return_aux=aux_enabled,
+            )
+            logits, value = out[0], out[1]
+            i = 2
+            q_values = out[i] if q_enabled else None
+            if q_enabled: i += 1
+            aux = out[i] if aux_enabled else None
             log_probs = F.log_softmax(logits, dim=-1)
             new_logp = log_probs.gather(1, mb.action_idx.unsqueeze(-1)).squeeze(-1)
             log_ratio = new_logp - mb.old_log_prob
@@ -490,12 +510,27 @@ def ppo_update(
                 if cfg.c_aux_margin > 0.0:
                     aux_m_loss = F.smooth_l1_loss(aux["margin"], mb.aux_compile_margin)
 
+            # Q-head TD(0) loss: Q(s, a_taken) → ret. Each row's target
+            # is the GAE-derived return for that decision, which is the
+            # same quantity the value head regresses against — so the
+            # Q-head learns "value of having taken THIS specific
+            # action" while the value head learns "expected value of
+            # the state under the current policy." Q is trained on ALL
+            # actions (not just CHOOSE_TARGET) — more data → more
+            # accurate Q estimates everywhere. Used at INFERENCE only
+            # for CHOOSE_TARGET routing (see NNAgent.q_for_choose_target).
+            q_loss = torch.tensor(0.0, device=logits.device)
+            if q_enabled:
+                q_taken = q_values.gather(1, mb.action_idx.unsqueeze(-1)).squeeze(-1)
+                q_loss = F.mse_loss(q_taken, mb.ret)
+
             loss = (
                 pg_loss
                 + cfg.c_value * v_loss
                 - cfg.c_entropy * entropy_weighted
                 + cfg.c_aux_opp_hand * aux_oh_loss
                 + cfg.c_aux_margin * aux_m_loss
+                + cfg.c_q * q_loss
             )
 
             optimiser.zero_grad()
@@ -519,6 +554,7 @@ def ppo_update(
             stats["entropy"] += float(entropy_unweighted.item())
             stats["aux_opp_hand_loss"] += float(aux_oh_loss.item())
             stats["aux_margin_loss"] += float(aux_m_loss.item())
+            stats["q_loss"] += float(q_loss.item())
             stats["approx_kl"] += float(approx_kl)
             stats["n"] += 1
 
@@ -532,7 +568,7 @@ def ppo_update(
     if stats["n"]:
         for k in (
             "pg_loss", "v_loss", "entropy",
-            "aux_opp_hand_loss", "aux_margin_loss", "approx_kl",
+            "aux_opp_hand_loss", "aux_margin_loss", "q_loss", "approx_kl",
         ):
             stats[k] /= stats["n"]
     # Per-class entropy means for diagnostics (NaN where unobserved).
@@ -692,8 +728,16 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
         # Stochastic pool opponents — matches inference behavior and is
         # the right target for a mixed-equilibrium policy. See the eval
         # docstring above for the same reasoning.
+        # Q-head OFF for the seeded init_ckpt opponent: the source
+        # checkpoint may not have trained the Q-head (older snapshots
+        # predate it), in which case its Q weights are at random init
+        # and routing CHOOSE_TARGET through them would tank its play.
+        # We check the source ckpt's metadata explicitly.
+        init_state = torch.load(cfg.init_ckpt, map_location="cpu", weights_only=False)
+        init_has_q = bool(init_state.get("trained_with_q_head", False))
         pool.add(
-            NNAgent(frozen, device=device, stochastic=True),
+            NNAgent(frozen, device=device, stochastic=True,
+                    q_for_choose_target=init_has_q),
             name=Path(cfg.init_ckpt).stem,
         )
 
@@ -756,7 +800,7 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
         msg = (
             f"[iter {it:4d}] games={cfg.games_per_iter} trans={len(all_records)} "
             f"rollout_wr={rollout_wr:.2f} "
-            f"pg={stats['pg_loss']:.3f} v={stats['v_loss']:.3f} "
+            f"pg={stats['pg_loss']:.3f} v={stats['v_loss']:.3f} q={stats['q_loss']:.3f} "
             f"ent={stats['entropy']:.3f} c_ent={c_entropy:.4f} kl={stats['approx_kl']:.4f} "
             f"aux_oh={stats['aux_opp_hand_loss']:.3f} aux_m={stats['aux_margin_loss']:.3f} "
             f"ent_by_cls=[{' '.join(ent_parts)}] "
@@ -782,6 +826,7 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             "count_by_class": stats.get("count_by_class", {}),
             "aux_opp_hand_loss": stats.get("aux_opp_hand_loss", 0.0),
             "aux_margin_loss": stats.get("aux_margin_loss", 0.0),
+            "q_loss": stats.get("q_loss", 0.0),
             "c_entropy": c_entropy,
             "per_class_entropy_mult": {
                 name: per_class_mult[i]
@@ -823,6 +868,13 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
                         "iter": it,
                         "wr_random": wr_random,
                         "wr_greedy": wr_greedy,
+                        # Records whether the Q-head was trained in this
+                        # run. Eval-time agent loaders use this to decide
+                        # whether to route CHOOSE_TARGET through argmax(Q)
+                        # — checkpoints from before the Q-head existed
+                        # (or runs with c_q=0) must NOT use Q at inference
+                        # since the head's weights are at random init.
+                        "trained_with_q_head": cfg.c_q > 0.0,
                     },
                     ckpt_path,
                 )
@@ -831,9 +883,11 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             if wr_random >= cfg.pool_threshold_wr_random:
                 frozen = copy.deepcopy(model).eval()
                 # Stochastic — target mixed equilibrium, not argmax-exploitable
-                # prior selves. See eval docstring above.
+                # prior selves. See eval docstring above. Q-head ON: pool
+                # members play as the deployed agent would.
                 evicted = pool.add(
-                    NNAgent(frozen, device=device, stochastic=True),
+                    NNAgent(frozen, device=device, stochastic=True,
+                            q_for_choose_target=True),
                     name=f"iter_{it:05d}",
                 )
                 record["pool_grew"] = True
