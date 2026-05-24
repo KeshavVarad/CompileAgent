@@ -2369,3 +2369,254 @@ def test_value_5_play_with_empty_hand_is_noop():
     g._drive()
     assert len(g.state.players[0].trash) == 0
     assert g._pending == []
+
+
+def test_corruption_1_redirects_returns_to_opp_deck():
+    """Corruption 1 bottom: 'When a card would be returned to your
+    opponent's hand: Put that card on top of their deck face-down
+    instead.' Verify by playing through a return scenario:
+
+      P0 owns Corruption 1 face-up + uncovered (so its bottom is active).
+      P1 has an uncovered face-up card on the field.
+      P0 plays Fear 2, which forces a return of an opp card.
+
+    Without Corruption 1: opp card lands in opp's hand.
+    With Corruption 1:   opp card lands on top of opp's DECK face-down.
+
+    Integration-tests through the engine's normal action flow rather
+    than pushing effects directly — so we also exercise the
+    return_card_to_hand hook path."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import return_card_to_hand
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=600, include_main2=True))
+    g.set_predetermined_draft(
+        [["Corruption", "Fear", "Fire"], ["Light", "Water", "Speed"]]
+    )
+    defs = load_card_defs()
+    corr_1 = next(d for d in defs if d.key == "MN02:Corruption:1")
+    fear_2 = next(d for d in defs if d.key == "MN02:Fear:2")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    water_1 = next(d for d in defs if d.key == "MN01:Water:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0: Corruption 1 face-up + uncovered on Corruption line.
+    c1 = CardInst(inst_id=60001, def_id=corr_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [c1]
+    # P1: a face-up card on Water line (Water 1).
+    victim = CardInst(inst_id=60002, def_id=water_1.def_id, owner=1, face_up=True)
+    g.state.lines[1].p1_stack = [victim]
+    # P0 plays Fear 2 by hand (so we can fire the real action path).
+    g.state.players[0].hand = [
+        CardInst(inst_id=60010, def_id=fear_2.def_id, owner=0, face_up=False),
+    ]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = [
+        CardInst(inst_id=60100 + i, def_id=light_1.def_id, owner=1, face_up=False)
+        for i in range(2)
+    ]
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    # Play Fear 2 face-up in the Fear line (line 1).
+    pre_opp_hand = len(g.state.players[1].hand)
+    pre_opp_deck = len(g.state.players[1].deck)
+    pre_victim_on_field = victim in g.state.lines[1].p1_stack
+    assert pre_victim_on_field
+    play_a = Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=1)
+    g.step(play_a)
+    g._drive()
+    # Fear 2's middle yielded a Choice: "Return 1 opp card". Resolve it
+    # by picking the first legal CHOOSE_TARGET.
+    if g._pending and g._pending[-1].last_choice is not None:
+        g.step(g.legal_actions()[0])
+        g._drive()
+    # Victim should be off the field.
+    assert victim not in g.state.lines[1].p1_stack, "Fear 2 should have returned the opp card off the field"
+    # WITH Corruption 1 active: opp hand unchanged, opp deck got +1
+    # face-down card (the redirected victim).
+    assert len(g.state.players[1].hand) == pre_opp_hand, (
+        f"opp hand should NOT have grown (Corruption 1 redirect); "
+        f"got {pre_opp_hand} -> {len(g.state.players[1].hand)}"
+    )
+    assert len(g.state.players[1].deck) == pre_opp_deck + 1, (
+        f"opp deck should have grown by 1 (returned card placed on top); "
+        f"got {pre_opp_deck} -> {len(g.state.players[1].deck)}"
+    )
+    assert g.state.players[1].deck[-1] is victim, (
+        "victim card should be on TOP of opp's deck (last element)"
+    )
+    assert not g.state.players[1].deck[-1].face_up, (
+        "victim should be placed face-down"
+    )
+
+
+def test_corruption_1_no_effect_when_covered():
+    """Corruption 1's bottom is auxiliary (bottom tier) — only active
+    while uncovered (Codex p.13). Verify that when Corruption 1 is
+    covered, the redirect does NOT happen: returned cards go to the
+    normal hand destination."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import return_card_to_hand
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=601, include_main2=True))
+    g.set_predetermined_draft(
+        [["Corruption", "Fire", "Speed"], ["Light", "Water", "Plague"]]
+    )
+    defs = load_card_defs()
+    corr_1 = next(d for d in defs if d.key == "MN02:Corruption:1")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    water_1 = next(d for d in defs if d.key == "MN01:Water:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0: Corruption 1 COVERED by Fire 1 on line 0.
+    c1 = CardInst(inst_id=60201, def_id=corr_1.def_id, owner=0, face_up=True)
+    cover = CardInst(inst_id=60202, def_id=light_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [c1, cover]  # Corruption 1 is covered
+    # P1: card on field to be returned.
+    victim = CardInst(inst_id=60203, def_id=water_1.def_id, owner=1, face_up=True)
+    g.state.lines[1].p1_stack = [victim]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = [
+        CardInst(inst_id=60300, def_id=light_1.def_id, owner=1, face_up=False)
+    ]
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    pre_opp_hand = len(g.state.players[1].hand)
+    pre_opp_deck = len(g.state.players[1].deck)
+    # Trigger a return directly via the helper.
+    return_card_to_hand(g.state, 1, 1, 0)
+    # Should land in HAND (not deck) since Corruption 1 is covered.
+    assert len(g.state.players[1].hand) == pre_opp_hand + 1, (
+        "covered Corruption 1 should NOT redirect; returned card goes to hand"
+    )
+    assert len(g.state.players[1].deck) == pre_opp_deck, (
+        "covered Corruption 1 should NOT redirect; deck unchanged"
+    )
+
+
+def test_unity_0_flip_trigger_fires_when_flipped_by_unity_card():
+    """Unity 0 bottom: 'When this card would be flipped by a Unity card:
+    First, flip 1 card or draw 1 card.' Verify by playing through:
+
+      P0 has Unity 0 face-up on Unity line + another Unity card (so
+        Unity 3's middle precondition '>=2 Unity cards in field' holds).
+      P0 plays Unity 3 face-up, whose middle prompts to flip a card.
+      P0 picks Unity 0 as the flip target.
+      Unity 0's flip_trigger should fire, prompting 'flip or draw'."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=700, include_aux2=True, include_main2=True))
+    g.set_predetermined_draft(
+        [["Unity", "Light", "Fire"], ["Death", "Water", "Speed"]]
+    )
+    defs = load_card_defs()
+    unity_0 = next(d for d in defs if d.key == "AX02:Unity:0")
+    unity_2 = next(d for d in defs if d.key == "AX02:Unity:2")
+    unity_3 = next(d for d in defs if d.key == "AX02:Unity:3")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # Unity 0 on line 1 (not line 0) so the Unity 3 we're about to play
+    # face-up to the Unity line (line 0) doesn't cover it. Unity 2 on
+    # line 2 satisfies Unity 3's "another Unity card in field"
+    # precondition. Manual placement bypasses the matching-protocol
+    # restriction that normally applies only at PLAY time.
+    u0 = CardInst(inst_id=70001, def_id=unity_0.def_id, owner=0, face_up=True)
+    u2 = CardInst(inst_id=70002, def_id=unity_2.def_id, owner=0, face_up=True)
+    g.state.lines[1].p0_stack = [u0]
+    g.state.lines[2].p0_stack = [u2]
+    g.state.players[0].hand = [
+        CardInst(inst_id=70010, def_id=unity_3.def_id, owner=0, face_up=False),
+    ]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=70100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(3)
+    ]
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    pre_hand_size = len(g.state.players[0].hand)
+    # Play Unity 3 face-up (line 0, where Unity is). Its middle will
+    # prompt "flip 1 face-up card".
+    play_a = Action(type=ActionType.PLAY_FACE_UP, hand_index=0, line_index=0)
+    g.step(play_a)
+    g._drive()
+    # Now we're at Unity 3's middle Choice — find Unity 0 in the targets
+    # and pick it.
+    assert g._pending and g._pending[-1].last_choice is not None, (
+        "Unity 3's middle should yield a flip-target Choice"
+    )
+    choice = g._pending[-1].last_choice
+    unity_0_idx = None
+    for i, t in enumerate(choice.targets):
+        if isinstance(t, tuple) and len(t) >= 4 and t[3] is u0:
+            unity_0_idx = i
+            break
+    assert unity_0_idx is not None, (
+        f"Unity 0 should be among the legal flip targets; got {choice.targets}"
+    )
+    g.step(g.legal_actions()[unity_0_idx])
+    g._drive()
+    # After Unity 0 is flipped face-down by Unity 3, its FLIP_TRIGGER
+    # should fire, prompting "flip 1 card or draw 1".
+    assert not u0.face_up, "Unity 0 should now be face-down"
+    assert g._pending and g._pending[-1].last_choice is not None, (
+        "Unity 0's flip_trigger should yield a 'flip or draw' Choice"
+    )
+    prompt = g._pending[-1].last_choice.prompt
+    assert "flipped by a Unity card" in prompt or "flip 1 card or draw 1" in prompt, (
+        f"unexpected prompt: {prompt!r}"
+    )
+    # Pick "draw 1" (option index 1).
+    g.step(g.legal_actions()[1])
+    g._drive()
+    assert len(g.state.players[0].hand) == pre_hand_size, (
+        # +1 from the draw, -1 from playing Unity 3 → net zero.
+        f"draw should restore hand to pre-play size; got "
+        f"{pre_hand_size} -> {len(g.state.players[0].hand)}"
+    )
+
+
+def test_unity_0_flip_trigger_does_not_fire_when_flipped_by_non_unity():
+    """Inverse: if Unity 0 is flipped by a NON-Unity card (e.g., Mirror 3),
+    the bottom trigger should NOT fire. Verify the gate works."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.actions import Action, ActionType
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import flip_card
+    g = Game(GameConfig(seed=701, include_aux2=True))
+    g.set_predetermined_draft(
+        [["Unity", "Light", "Fire"], ["Death", "Water", "Speed"]]
+    )
+    defs = load_card_defs()
+    unity_0 = next(d for d in defs if d.key == "AX02:Unity:0")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    u0 = CardInst(inst_id=70201, def_id=unity_0.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [u0]
+    g.state.players[0].hand = []
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    # Use a Light 1 stub as the "cause" (non-Unity protocol).
+    light_stub = CardInst(inst_id=70210, def_id=light_1.def_id, owner=0, face_up=True)
+    flip_card(g.state, 0, 0, 0, cause_card=light_stub)
+    g._drive()
+    assert not u0.face_up
+    # Unity 0's trigger SHOULD NOT have fired — no pending choice.
+    assert not g._pending or g._pending[-1].last_choice is None, (
+        "Unity 0's flip_trigger should not fire for non-Unity causes"
+    )

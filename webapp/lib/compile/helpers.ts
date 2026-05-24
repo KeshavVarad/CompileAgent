@@ -242,10 +242,15 @@ export function flipCard(
   lineIdx: number,
   player: PlayerIndex,
   stackPos: number,
+  causeCard: CardInst | null = null,
 ): CardInst {
   const stack = lineStack(state.lines[lineIdx], player);
   const c = stack[stackPos];
   const d = safeCardDef(c.defId);
+  // Surface the flip cause so post-flip triggers (Unity 0 bottom etc.)
+  // can read it. Used by Unity 0's flip_trigger to gate on "by a Unity
+  // card" condition. Mirrors src/compile_engine/effects.py.
+  state.scratch["_last_flip_cause"] = causeCard;
   // Ice 4: "This card cannot be flipped." Persistent immunity while
   // face-up on the field. Mirrors src/compile_engine/effects.py.
   if (d.key === "MN02:Ice:4" && c.faceUp) {
@@ -334,6 +339,22 @@ export function shiftCard(
   return c;
 }
 
+/**
+ * Returns true iff `player` has MN02:Corruption:1 face-up AND uncovered
+ * on the field. Bottom-tier text is auxiliary (Codex p.13) — only active
+ * while uncovered. Used by `returnCardToHand` to redirect.
+ */
+function hasActiveCorruption1(state: GameState, player: PlayerIndex): boolean {
+  for (let ln = 0; ln < state.lines.length; ln++) {
+    const stack = lineStack(state.lines[ln], player);
+    if (stack.length === 0) continue;
+    const top = stack[stack.length - 1];
+    if (!top.faceUp || top.defId < 0) continue;
+    if (CARD_DEFS[top.defId].key === "MN02:Corruption:1") return true;
+  }
+  return false;
+}
+
 export function returnCardToHand(
   state: GameState,
   lineIdx: number,
@@ -344,7 +365,22 @@ export function returnCardToHand(
   const wasTop = stackPos === stack.length - 1;
   const [c] = stack.splice(stackPos, 1);
   c.faceUp = false;
-  state.players[c.owner].hand.push(c);
+  // Corruption 1 bottom: "When a card would be returned to your
+  // opponent's hand: Put that card on top of their deck face-down
+  // instead." (Codex p.13.) The "your opponent" is from Corruption 1's
+  // owner's POV, so the trigger condition is: if `c.owner`'s opponent
+  // has Corruption 1 active, redirect.
+  const recipient = c.owner;
+  const oppOfRecipient: PlayerIndex = recipient === 0 ? 1 : 0;
+  if (hasActiveCorruption1(state, oppOfRecipient)) {
+    state.players[recipient].deck.push(c);
+    logInfo(
+      state,
+      `Corruption 1 redirect: returned card placed on top of P${recipient + 1}'s deck face-down`,
+    );
+  } else {
+    state.players[recipient].hand.push(c);
+  }
   // Removing the top exposes the under-card → fire its middle.
   if (wasTop && stack.length && stack[stack.length - 1].faceUp) {
     state.triggers.push({ kind: "uncover", line: lineIdx, player, card: stack[stack.length - 1] });
