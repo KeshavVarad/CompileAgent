@@ -419,13 +419,31 @@ def ppo_update(
             pg_loss = -torch.min(ratio * mb.advantage, clipped * mb.advantage).mean()
             v_loss = F.mse_loss(value, mb.ret)
             probs = torch.softmax(logits, dim=-1)
-            # Per-step entropy [B], averaged over the batch with a per-class
-            # weight so DRAFT decisions get more entropy push than PLAY.
             per_step_entropy = -(
                 probs * log_probs * mb.action_mask.float()
             ).sum(dim=-1)                                            # [B]
-            weight_per_step = class_mult[mb.action_class]            # [B]
-            entropy_weighted = (per_step_entropy * weight_per_step).mean()
+            # Per-class mean entropy — each class contributes proportionally
+            # to its multiplier, NOT to how often it appears in the batch.
+            # Previously this was `(per_step_entropy * weight_per_step).mean()`
+            # which silently weighted DRAFT (~5% of transitions) by its batch
+            # share — making a "3.0 mult" actually contribute 3.0 × 5% = 15%
+            # of the entropy term, not the intended 3×. The fix is to mean
+            # within each class first, then weighted-sum across classes.
+            # Normalized by sum-of-multipliers so the absolute magnitude of
+            # the entropy term stays comparable to the all-1-mult case
+            # (i.e. c_entropy keeps its previous meaning).
+            weighted_sum = torch.zeros((), device=per_step_entropy.device)
+            total_weight = 0.0
+            for cls in range(N_ACTION_CLASSES):
+                mask = (mb.action_class == cls)
+                if mask.any():
+                    cls_mean_entropy = per_step_entropy[mask].mean()
+                    weighted_sum = weighted_sum + class_mult[cls] * cls_mean_entropy
+                    total_weight += float(cfg.per_class_entropy_mult[cls])
+            if total_weight > 0.0:
+                entropy_weighted = weighted_sum / total_weight
+            else:
+                entropy_weighted = per_step_entropy.mean()
             # Unweighted entropy for logging — keeps the metric comparable
             # to historical runs.
             entropy_unweighted = per_step_entropy.mean()
