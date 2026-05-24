@@ -2298,3 +2298,74 @@ def test_life_3_fires_on_cover_not_on_play():
         f"deck size should drop by 1 (face-down play consumes top); "
         f"deck: {pre_deck} → {post_deck}"
     )
+
+
+def test_value_5_play_forces_discard():
+    """Codex p.2: 'You discard 1 card.' on value-5 cards is an effect that
+    fires on play (not a free cost). Verify a value-5 face-up play
+    consumes 1 card from hand. Regression test for the bulk
+    _value5_discard registration at effects.py:1190."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import MIDDLE_EFFECTS, _value5_discard
+    defs = load_card_defs()
+    # Sanity: every value-5 card has a middle handler wired.
+    for d in defs:
+        if d.value == 5:
+            assert d.key in MIDDLE_EFFECTS, f"{d.key} missing middle handler"
+            assert MIDDLE_EFFECTS[d.key] is _value5_discard, (
+                f"{d.key} should share the bulk-registered _value5_discard"
+            )
+    g = Game(GameConfig(seed=500))
+    g.set_predetermined_draft([["Light", "Fire", "Speed"], ["Death", "Water", "Plague"]])
+    light_5 = next(d for d in defs if d.key == "MN01:Light:5")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    g.state.players[0].hand = [
+        CardInst(inst_id=50001, def_id=light_5.def_id, owner=0, face_up=False),
+        CardInst(inst_id=50002, def_id=light_1.def_id, owner=0, face_up=False),
+        CardInst(inst_id=50003, def_id=light_1.def_id, owner=0, face_up=False),
+    ]
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    pre_hand = len(g.state.players[0].hand)
+    pre_trash = len(g.state.players[0].trash)
+    g._push_effect(_value5_discard(g.state, 0, 0, g.state.players[0].hand[0]))
+    g._drive()
+    if g._pending:
+        g.step(g.legal_actions()[0])
+    assert len(g.state.players[0].hand) == pre_hand - 1
+    assert len(g.state.players[0].trash) == pre_trash + 1
+
+
+def test_value_5_play_with_empty_hand_is_noop():
+    """Codex p.2: 'If you cannot complete the text of a card (i.e.
+    "You discard 1 card." when you have no cards in hand) the card is
+    still played.' Verify firing the middle on an empty hand doesn't
+    crash or leave the engine in a pending state."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst
+    from compile_engine.effects import _value5_discard
+    g = Game(GameConfig(seed=501))
+    g.set_predetermined_draft([["Fire", "Light", "Speed"], ["Death", "Water", "Plague"]])
+    defs = load_card_defs()
+    fire_5 = next(d for d in defs if d.key == "MN01:Fire:5")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    g.state.players[0].hand = []  # empty
+    g.state.players[1].hand = []
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    stub = CardInst(inst_id=50101, def_id=fire_5.def_id, owner=0, face_up=True)
+    g._push_effect(_value5_discard(g.state, 0, 0, stub))
+    g._drive()
+    assert len(g.state.players[0].trash) == 0
+    assert g._pending == []
