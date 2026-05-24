@@ -163,7 +163,7 @@ def main() -> None:
     print(f"loading checkpoint: {args.ckpt}")
     state = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     inner = PolicyValueNet()
-    inner.load_state_dict(state["model"])
+    inner.load_state_dict(state["model"], strict=False)
     inner.eval()
     wrapper = FlatPolicyValueNet(inner).eval()
 

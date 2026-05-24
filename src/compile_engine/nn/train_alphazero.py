@@ -458,7 +458,9 @@ def train(cfg: AZConfig | None = None) -> PolicyValueNet:
     model = PolicyValueNet().to(device)
     if cfg.init_ckpt:
         state = torch.load(cfg.init_ckpt, map_location=device, weights_only=False)
-        model.load_state_dict(state["model"])
+        # strict=False — older snapshots predate the UNREAL aux heads in
+        # PolicyValueNet; new heads stay at random init.
+        model.load_state_dict(state["model"], strict=False)
         print(f"Hot-started from {cfg.init_ckpt}")
     model.train()
 

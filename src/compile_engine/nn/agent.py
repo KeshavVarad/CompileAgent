@@ -12,9 +12,34 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from ..actions import Action
+from ..actions import Action, ActionType
 from .encoder import encode_actions, encode_state
 from .model import PolicyValueNet
+
+
+# Action-class bucketing for per-action-type entropy + diagnostics.
+# Each step's decision falls into exactly one of these classes (legal_actions
+# in any single step share an ActionType class, by engine construction).
+ACTION_CLASS_NAMES = ("DRAFT", "PLAY", "CHOOSE", "COMPILE", "DISCARD", "SHIFT")
+N_ACTION_CLASSES = len(ACTION_CLASS_NAMES)
+
+_ACTION_CLASS_BY_TYPE: dict[int, int] = {
+    int(ActionType.DRAFT_PROTOCOL): 0,
+    int(ActionType.PLAY_FACE_UP):   1,
+    int(ActionType.PLAY_FACE_DOWN): 1,
+    int(ActionType.REFRESH):        1,
+    int(ActionType.CHOOSE_TARGET):  2,
+    int(ActionType.SKIP_OPTIONAL):  2,
+    int(ActionType.COMPILE_LINE):   3,
+    int(ActionType.DISCARD_CARD):   4,
+    int(ActionType.SHIFT_OWN_CARD): 5,
+    int(ActionType.NOOP):           1,   # not produced for the agent, but mapped harmlessly
+}
+
+
+def action_class_of(action_type: ActionType) -> int:
+    """Map an ActionType to its 0-based class index used by per-class entropy."""
+    return _ACTION_CLASS_BY_TYPE[int(action_type)]
 
 
 @dataclass
@@ -32,11 +57,21 @@ class StepRecord:
     action_idx: int
     log_prob: float
     value: float
+    # Decision-class index (DRAFT / PLAY / CHOOSE / COMPILE / DISCARD / SHIFT).
+    # Used by per-action-type entropy regularisation in ppo_update + per-class
+    # entropy diagnostics. See ACTION_CLASS_NAMES above.
+    action_class: int = 0
     reward: float = 0.0   # filled later by the rollout collector
     done: bool = False    # filled later
     # advantage / return computed in the buffer after the episode ends
     advantage: float = 0.0
     ret: float = 0.0
+    # UNREAL-style auxiliary targets — captured during rollout, used as
+    # supervised labels for auxiliary prediction heads in ppo_update. They
+    # don't bias the policy (no influence on action selection); they only
+    # give the shared encoder richer training signal.
+    aux_opp_hand_multi_hot: np.ndarray | None = None  # [CARD_VOCAB_SIZE], filled by collector
+    aux_compile_margin: float = 0.0   # filled after episode terminates
 
 
 def _state_to_torch(state: dict[str, np.ndarray], device: torch.device) -> dict[str, torch.Tensor]:
@@ -119,6 +154,11 @@ class NNAgent:
         log_prob = float(log_probs[idx].item())
 
         if self.record is not None:
+            # All `legal` actions in any single decision step share an
+            # ActionType class (by engine construction — each phase emits
+            # one class of legal actions). Tag from legal[0] so we don't
+            # care which option the policy ended up picking.
+            cls = action_class_of(legal[0].type)
             self.record.append(StepRecord(
                 state=state,
                 action_raw=raw,
@@ -129,5 +169,6 @@ class NNAgent:
                 action_idx=idx,
                 log_prob=log_prob,
                 value=value_scalar,
+                action_class=cls,
             ))
         return legal[idx]

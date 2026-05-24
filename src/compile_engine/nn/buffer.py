@@ -27,6 +27,15 @@ class Batch:
     old_log_prob: torch.Tensor
     advantage: torch.Tensor
     ret: torch.Tensor
+    # Per-step decision class (DRAFT / PLAY / CHOOSE / COMPILE / DISCARD /
+    # SHIFT) — used by per-action-type entropy regularisation.
+    action_class: torch.Tensor
+    # UNREAL-style aux supervision. Padded to the right shape even if the
+    # collector didn't fill them in (default zeros = no-signal target),
+    # though the train loop only enables the aux loss when collection is
+    # wired up. See StepRecord.
+    aux_opp_hand: torch.Tensor          # [B, CARD_VOCAB_SIZE]
+    aux_compile_margin: torch.Tensor    # [B]
 
 
 def compute_gae(
@@ -56,6 +65,7 @@ def compute_gae(
 
 def stack_batch(records: list[StepRecord], device: torch.device) -> Batch:
     """Bundle records into a torch Batch ready for the PPO update step."""
+    from .encoder import CARD_VOCAB_SIZE
     keys = list(records[0].state.keys())
     state = {}
     for k in keys:
@@ -72,6 +82,21 @@ def stack_batch(records: list[StepRecord], device: torch.device) -> Batch:
     old_log_prob = torch.tensor([r.log_prob for r in records], dtype=torch.float32, device=device)
     advantage = torch.tensor([r.advantage for r in records], dtype=torch.float32, device=device)
     ret = torch.tensor([r.ret for r in records], dtype=torch.float32, device=device)
+    action_class = torch.tensor(
+        [r.action_class for r in records], dtype=torch.long, device=device,
+    )
+    # Aux supervision: stack opp-hand multi-hots (collector fills these in;
+    # if unset we emit a zero vector so the aux loss is a no-op on that row).
+    aux_oh = np.stack([
+        r.aux_opp_hand_multi_hot
+        if r.aux_opp_hand_multi_hot is not None
+        else np.zeros(CARD_VOCAB_SIZE, dtype=np.float32)
+        for r in records
+    ])
+    aux_opp_hand = torch.from_numpy(aux_oh).to(device)
+    aux_compile_margin = torch.tensor(
+        [r.aux_compile_margin for r in records], dtype=torch.float32, device=device,
+    )
     return Batch(
         state=state,
         action_raw=action_raw,
@@ -83,6 +108,9 @@ def stack_batch(records: list[StepRecord], device: torch.device) -> Batch:
         old_log_prob=old_log_prob,
         advantage=advantage,
         ret=ret,
+        action_class=action_class,
+        aux_opp_hand=aux_opp_hand,
+        aux_compile_margin=aux_compile_margin,
     )
 
 
@@ -103,4 +131,7 @@ def minibatches(batch: Batch, batch_size: int, rng: np.random.Generator):
             old_log_prob=batch.old_log_prob[sel_t],
             advantage=batch.advantage[sel_t],
             ret=batch.ret[sel_t],
+            action_class=batch.action_class[sel_t],
+            aux_opp_hand=batch.aux_opp_hand[sel_t],
+            aux_compile_margin=batch.aux_compile_margin[sel_t],
         )
