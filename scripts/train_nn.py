@@ -62,14 +62,34 @@ def main() -> None:
                          "you can hand an AZ checkpoint to PPO here.")
     # Per-action-type entropy multipliers — DRAFT defaults to 4x to counter
     # the mode collapse documented in docs/STRATEGY_THESIS_sparkv4.md.
+    # These are STARTING values; the per-class adaptive controller (flags
+    # below) adjusts them each iter to keep per-class entropy in a target
+    # band, preventing the runaway exploration that destroyed iter 60+
+    # of runs/20260524-023022-ppo-entropy-aux.
     ap.add_argument("--draft-entropy-mult", type=float, default=4.0,
-                    help="multiplier on c_entropy for DRAFT decisions only. "
-                         "set high (4-8) to keep draft exploration alive — "
-                         "Spark v4 collapsed Darkness to 98%% under mult=1.")
+                    help="starting multiplier on c_entropy for DRAFT decisions. "
+                         "set high (3-8) to break Darkness-98%% mode collapse; "
+                         "the adaptive controller eases it back when DRAFT "
+                         "entropy crosses --draft-entropy-ceiling.")
     ap.add_argument("--choose-entropy-mult", type=float, default=2.0,
-                    help="multiplier on c_entropy for CHOOSE_TARGET decisions. "
+                    help="starting multiplier on c_entropy for CHOOSE_TARGET. "
                          "boosts exploration of optional clauses (Love 1 End "
                          "was rejected 47/47 times under mult=1).")
+    # Per-class adaptive controller target bands.
+    ap.add_argument("--draft-entropy-floor", type=float, default=0.8,
+                    help="lower bound of DRAFT entropy target band (nats). "
+                         "below this, the DRAFT multiplier is bumped up by "
+                         "the adaptive controller. set <0 to disable.")
+    ap.add_argument("--draft-entropy-ceiling", type=float, default=1.4,
+                    help="upper bound of DRAFT entropy target band (nats). "
+                         "above this, the DRAFT multiplier is eased down. "
+                         "Was missing in run 20260524-023022 — DRAFT ran "
+                         "from 1.25 to 2.46 nats, destroying play structure.")
+    ap.add_argument("--choose-entropy-floor", type=float, default=0.5,
+                    help="lower bound of CHOOSE entropy target band (nats). "
+                         "set <0 to disable adaptive control on CHOOSE.")
+    ap.add_argument("--choose-entropy-ceiling", type=float, default=1.0,
+                    help="upper bound of CHOOSE entropy target band (nats).")
     # UNREAL-style aux loss coefficients.
     ap.add_argument("--c-aux-opp-hand", type=float, default=0.05,
                     help="coefficient on auxiliary 'predict opp's hand "
@@ -107,6 +127,18 @@ def main() -> None:
         per_class_entropy_mult=(
             args.draft_entropy_mult, 1.0, args.choose_entropy_mult,
             1.0, 1.0, 1.0,
+        ),
+        per_class_entropy_floor=(
+            args.draft_entropy_floor if args.draft_entropy_floor >= 0 else None,
+            None,
+            args.choose_entropy_floor if args.choose_entropy_floor >= 0 else None,
+            None, None, None,
+        ),
+        per_class_entropy_ceiling=(
+            args.draft_entropy_ceiling,
+            None,
+            args.choose_entropy_ceiling,
+            None, None, None,
         ),
         c_aux_opp_hand=args.c_aux_opp_hand,
         c_aux_margin=args.c_aux_margin,
