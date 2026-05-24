@@ -117,11 +117,24 @@ class NNAgent:
         device: torch.device | str = "cpu",
         stochastic: bool = False,
         record: list[StepRecord] | None = None,
+        q_for_choose_target: bool = False,
     ) -> None:
         self.model = model
         self.device = torch.device(device)
         self.stochastic = stochastic
         self.record = record
+        # When True, CHOOSE_TARGET / SKIP_OPTIONAL decisions use argmax
+        # over the Q-head's action-values instead of policy-head logits.
+        # See docs/STRATEGY_THESIS_sparkv4.md research-notes for the
+        # rationale: CHOOSE_TARGET happens during deterministic
+        # effect-resolution, the action sets are small (2-8 options),
+        # and there's no opp response between yields — argmax of a
+        # well-trained Q is the right rule. Outer turn-level decisions
+        # (PLAY/DRAFT/COMPILE) still go through the policy head because
+        # they DO need mixed-Nash-style stochasticity vs a responsive
+        # opponent. Default False — opt-in for inference (eval, deployed
+        # agent), opt-out for PPO rollouts (which need exploration).
+        self.q_for_choose_target = q_for_choose_target
 
     def set_record(self, record: list[StepRecord] | None) -> None:
         self.record = record
@@ -138,18 +151,41 @@ class NNAgent:
         ar, ac, ap_t, ae, am = _to_torch_actions(
             raw, card_ids, proto_ids, extra_card_ids, mask, self.device,
         )
+        # Decide once whether we'll use the Q-head for this decision —
+        # only when the agent is configured for it AND the current
+        # decision class is CHOOSE/SKIP. Reuses the per-class enum to
+        # avoid any drift between the two routing decisions (which
+        # class gets Q-head vs which gets per-class entropy).
+        use_q_for_this = (
+            self.q_for_choose_target
+            and action_class_of(legal[0].type) == 2  # CHOOSE class
+        )
         with torch.no_grad():
-            logits, value = self.model(s, ar, ac, ap_t, ae, am)
+            if use_q_for_this:
+                logits, value, q_values = self.model(
+                    s, ar, ac, ap_t, ae, am, return_q=True,
+                )
+            else:
+                logits, value = self.model(s, ar, ac, ap_t, ae, am)
+                q_values = None
         logits = logits[0]
         value_scalar = float(value[0].item())
-        # Renormalise over legal actions only.
-        if self.stochastic:
+
+        if use_q_for_this:
+            # Argmax over Q for CHOOSE_TARGET — no stochasticity at
+            # inference. The action mask is already baked into q_values
+            # (padded positions set to -1e9 in the forward pass).
+            idx = int(torch.argmax(q_values[0]).item())
+        elif self.stochastic:
             probs = torch.softmax(logits, dim=-1)
             idx = int(torch.distributions.Categorical(probs=probs).sample().item())
         else:
             idx = int(torch.argmax(logits).item())
 
         # log_prob of chosen action under the current policy (for PPO ratio).
+        # We always compute this against the POLICY head's logits — even
+        # if we picked via Q above, PPO needs the policy's probability of
+        # the chosen action for the importance ratio.
         log_probs = torch.log_softmax(logits, dim=-1)
         log_prob = float(log_probs[idx].item())
 

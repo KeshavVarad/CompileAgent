@@ -67,6 +67,20 @@ def load_model_from_ckpt(ckpt_path: str, device: torch.device) -> PolicyValueNet
     return model
 
 
+def checkpoint_has_q_head(ckpt_path: str) -> bool:
+    """Did this checkpoint's training run train the Q-head?
+
+    Returns True only when the checkpoint metadata explicitly says
+    `trained_with_q_head=True`. Older checkpoints don't have this key
+    and default to False — those load the Q-head weights at random
+    init via strict=False, and routing CHOOSE_TARGET through random
+    weights would be ~uniform-random across 32% of decisions =
+    catastrophic. So default OFF is safe.
+    """
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    return bool(state.get("trained_with_q_head", False))
+
+
 def build_agent(spec: OpponentSpec, device: torch.device, *, seed: int = 0,
                 stochastic: bool = True):
     """Instantiate an Agent from a spec. `stochastic=True` (default) makes
@@ -81,7 +95,13 @@ def build_agent(spec: OpponentSpec, device: torch.device, *, seed: int = 0,
     if spec.kind == "snapshot":
         assert spec.ckpt_path is not None
         m = load_model_from_ckpt(spec.ckpt_path, device)
-        return NNAgent(m, device=device, stochastic=stochastic)
+        # Auto-enable Q-head argmax for CHOOSE_TARGET ONLY for checkpoints
+        # that were actually trained with the Q-head. Older checkpoints
+        # have random-init Q weights from strict=False loading; routing
+        # 32% of decisions through random weights would tank WR.
+        use_q = checkpoint_has_q_head(spec.ckpt_path)
+        return NNAgent(m, device=device, stochastic=stochastic,
+                       q_for_choose_target=use_q)
     raise ValueError(f"unknown opponent kind: {spec.kind}")
 
 

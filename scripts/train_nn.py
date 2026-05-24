@@ -97,6 +97,11 @@ def main() -> None:
     ap.add_argument("--c-aux-margin", type=float, default=0.05,
                     help="coefficient on auxiliary 'predict final compile "
                          "margin' regression loss. 0 disables.")
+    ap.add_argument("--c-q", type=float, default=0.5,
+                    help="coefficient on the Q-head TD(0) loss. Q(s,a) is "
+                         "trained on all actions and used at INFERENCE for "
+                         "argmax routing on CHOOSE_TARGET only (deterministic "
+                         "mid-effect decisions). Set 0 to disable the Q-head.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -142,6 +147,7 @@ def main() -> None:
         ),
         c_aux_opp_hand=args.c_aux_opp_hand,
         c_aux_margin=args.c_aux_margin,
+        c_q=args.c_q,
     )
     train(cfg)
 
