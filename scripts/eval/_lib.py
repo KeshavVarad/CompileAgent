@@ -59,7 +59,10 @@ def load_model_from_ckpt(ckpt_path: str, device: torch.device) -> PolicyValueNet
     eval() mode."""
     model = PolicyValueNet().to(device)
     state = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(state["model"])
+    # strict=False so checkpoints from before the UNREAL aux heads were
+    # added still load — the aux heads stay at random init, which is
+    # harmless at eval time (we never call them).
+    model.load_state_dict(state["model"], strict=False)
     model.eval()
     return model
 

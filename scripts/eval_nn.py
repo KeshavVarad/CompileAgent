@@ -32,7 +32,7 @@ def main() -> None:
     device = _resolve_device(args.device)
     model = PolicyValueNet().to(device)
     state = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(state["model"])
+    model.load_state_dict(state["model"], strict=False)
     model.eval()
     opp = RandomAgent(seed=42) if args.opp == "random" else GreedyAgent(seed=42)
     result = evaluate(model, opp, args.games, device, expansion_prob=args.expansion_prob)

@@ -28,8 +28,14 @@ from ..agents import GreedyAgent, RandomAgent
 from ..env import play_game
 from ..game import Game
 from ..state import GameConfig
-from .agent import NNAgent, StepRecord
+from .agent import (
+    ACTION_CLASS_NAMES,
+    N_ACTION_CLASSES,
+    NNAgent,
+    StepRecord,
+)
 from .buffer import Batch, compute_gae, minibatches, stack_batch
+from .encoder import CARD_VOCAB_SIZE
 from .model import PolicyValueNet
 
 
@@ -63,6 +69,25 @@ class TrainConfig:
     c_entropy_step: float = 1.15   # multiplicative bump per iter when off-target
     c_entropy_min: float = 0.001
     c_entropy_max: float = 0.5
+    # Per-action-type entropy multipliers. The standard `c_entropy` term is
+    # multiplied by these per-class scalars when summing entropy across the
+    # batch. DRAFT decisions need a much larger entropy bonus because the
+    # Spark-v4 analysis (docs/STRATEGY_THESIS_sparkv4.md) showed the policy
+    # mode-collapsed to Darkness-98% without any reduction in win rate when
+    # blocked — i.e. the global entropy bonus is too weak to keep DRAFT
+    # exploration alive while still allowing the PLAY/COMPILE logits to
+    # sharpen. CHOOSE also gets a moderate boost (the Love-1-End trade was
+    # rejected 47/47 times — a credit-assignment-starved local optimum that
+    # more entropy on CHOOSE should help break). Order matches
+    # ACTION_CLASS_NAMES: (DRAFT, PLAY, CHOOSE, COMPILE, DISCARD, SHIFT).
+    per_class_entropy_mult: tuple[float, ...] = (4.0, 1.0, 2.0, 1.0, 1.0, 1.0)
+    # UNREAL-style auxiliary losses on the shared trunk. These don't bias
+    # the policy directly — they only give the encoder richer training
+    # signal (predict opponent's hidden hand contents + final compile
+    # margin). Coefficients are small relative to c_value so the
+    # supervised aux objective doesn't drown out RL gradients.
+    c_aux_opp_hand: float = 0.05      # 0 disables the aux head
+    c_aux_margin: float = 0.05
     snapshot_every: int = 10
     eval_games: int = 60
     # Snapshots are always checkpointed to disk. With PFSP sampling weak
@@ -209,6 +234,25 @@ class OpponentPool:
         return [(m.name, self._wr(m), len(m.results)) for m in self.members]
 
 
+def _opp_hand_multi_hot(game: Game, opp_seat: int) -> np.ndarray:
+    """Build a multi-hot of the opponent's hand-card def_ids.
+
+    Used as the supervised target for the UNREAL aux head that predicts
+    hidden-information state. The agent's own encoder never sees opp's
+    hand contents (only counts), so this is genuinely held-out signal.
+    """
+    # vocab layout matches PolicyValueNet.lookup_card: index 0 = PAD,
+    # 1 = HIDDEN, def_id d → token (d + 2). We use the same token id
+    # space here so the aux head's output is comparable to the model's
+    # internal card vocabulary.
+    target = np.zeros(CARD_VOCAB_SIZE, dtype=np.float32)
+    for c in game.state.players[opp_seat].hand:
+        tok = c.def_id + 2
+        if 0 <= tok < CARD_VOCAB_SIZE:
+            target[tok] = 1.0
+    return target
+
+
 def play_episode(
     model: PolicyValueNet,
     opponent,
@@ -218,6 +262,7 @@ def play_episode(
 ) -> tuple[list[StepRecord], int | None, int]:
     """Play one game. Returns (records from agent's seat, winner, agent_seat)."""
     agent_seat = rng.randint(0, 1)
+    opp_seat = 1 - agent_seat
     records: list[StepRecord] = []
     agent = NNAgent(model, device=device, stochastic=True, record=records)
     cfg_game = _make_config(rng, cfg)
@@ -248,8 +293,17 @@ def play_episode(
             records[-1].reward = float(shaping)
             records[-1].done = game.is_over()
             prev_compiled = new_compiled
+            # Aux ground truth: opp's hidden hand contents *at decision time*.
+            # Captured after step() since play_card / refresh effects mutate
+            # the same hand on this turn; the post-step state is what the
+            # bot's next observation would see, which is the closest match
+            # to "what's the opp holding now" the encoder needs to predict.
+            records[-1].aux_opp_hand_multi_hot = _opp_hand_multi_hot(game, opp_seat)
 
-    # Terminal credit on the last agent record.
+    # Terminal credit on the last agent record + back-fill final compile
+    # margin onto every captured record. The margin label is the SAME for
+    # every record in the episode (it's a per-episode regression target,
+    # like a value-function bootstrap from the truly terminal state).
     if records:
         w = game.state.winner
         if w is not None:
@@ -258,6 +312,12 @@ def play_episode(
             terminal = 0.0
         records[-1].reward += terminal
         records[-1].done = True
+        final_margin = float(
+            sum(game.state.players[agent_seat].compiled)
+            - sum(game.state.players[opp_seat].compiled)
+        )
+        for r in records:
+            r.aux_compile_margin = final_margin
     return records, game.state.winner, agent_seat
 
 
@@ -320,19 +380,37 @@ def ppo_update(
     """
     stats = {
         "pg_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
+        "aux_opp_hand_loss": 0.0, "aux_margin_loss": 0.0,
         "approx_kl": 0.0, "n": 0, "stopped_at_epoch": cfg.ppo_epochs,
     }
+    # Per-class entropy bookkeeping (summed numerator + summed weight per
+    # class, divided to a mean at the end).
+    ent_by_class_sum = [0.0] * N_ACTION_CLASSES
+    ent_by_class_n = [0] * N_ACTION_CLASSES
     adv = batch.advantage
     if adv.numel() > 1:
         batch.advantage = (adv - adv.mean()) / (adv.std() + 1e-8)
 
+    # Per-class entropy multipliers as a device tensor — sized once per call.
+    class_mult = torch.tensor(
+        cfg.per_class_entropy_mult, dtype=torch.float32,
+        device=batch.action_idx.device,
+    )
+    aux_enabled = (cfg.c_aux_opp_hand > 0.0) or (cfg.c_aux_margin > 0.0)
+
     stop_early = False
     for epoch in range(cfg.ppo_epochs):
         for mb in minibatches(batch, cfg.batch_size, rng):
-            logits, value = model(
-                mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids,
-                mb.action_extra_card_ids, mb.action_mask,
-            )
+            if aux_enabled:
+                logits, value, aux = model(
+                    mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids,
+                    mb.action_extra_card_ids, mb.action_mask, return_aux=True,
+                )
+            else:
+                logits, value = model(
+                    mb.state, mb.action_raw, mb.action_card_ids, mb.action_proto_ids,
+                    mb.action_extra_card_ids, mb.action_mask,
+                )
             log_probs = F.log_softmax(logits, dim=-1)
             new_logp = log_probs.gather(1, mb.action_idx.unsqueeze(-1)).squeeze(-1)
             log_ratio = new_logp - mb.old_log_prob
@@ -341,8 +419,41 @@ def ppo_update(
             pg_loss = -torch.min(ratio * mb.advantage, clipped * mb.advantage).mean()
             v_loss = F.mse_loss(value, mb.ret)
             probs = torch.softmax(logits, dim=-1)
-            entropy = -(probs * log_probs * mb.action_mask.float()).sum(dim=-1).mean()
-            loss = pg_loss + cfg.c_value * v_loss - cfg.c_entropy * entropy
+            # Per-step entropy [B], averaged over the batch with a per-class
+            # weight so DRAFT decisions get more entropy push than PLAY.
+            per_step_entropy = -(
+                probs * log_probs * mb.action_mask.float()
+            ).sum(dim=-1)                                            # [B]
+            weight_per_step = class_mult[mb.action_class]            # [B]
+            entropy_weighted = (per_step_entropy * weight_per_step).mean()
+            # Unweighted entropy for logging — keeps the metric comparable
+            # to historical runs.
+            entropy_unweighted = per_step_entropy.mean()
+
+            # UNREAL-style auxiliary losses on the shared trunk.
+            aux_oh_loss = torch.tensor(0.0, device=logits.device)
+            aux_m_loss = torch.tensor(0.0, device=logits.device)
+            if aux_enabled:
+                # Opp-hand multi-label classification. Skip rows where the
+                # collector didn't fill in a target (all-zero label) so we
+                # don't push the head toward "opp hand is empty."
+                tgt = mb.aux_opp_hand
+                has_target = (tgt.sum(dim=-1) > 0).float().unsqueeze(-1)   # [B, 1]
+                if cfg.c_aux_opp_hand > 0.0:
+                    bce = F.binary_cross_entropy_with_logits(
+                        aux["opp_hand_logits"], tgt, reduction="none",
+                    )
+                    aux_oh_loss = (bce * has_target).sum() / (has_target.sum() * tgt.shape[-1] + 1e-8)
+                if cfg.c_aux_margin > 0.0:
+                    aux_m_loss = F.smooth_l1_loss(aux["margin"], mb.aux_compile_margin)
+
+            loss = (
+                pg_loss
+                + cfg.c_value * v_loss
+                - cfg.c_entropy * entropy_weighted
+                + cfg.c_aux_opp_hand * aux_oh_loss
+                + cfg.c_aux_margin * aux_m_loss
+            )
 
             optimiser.zero_grad()
             loss.backward()
@@ -352,10 +463,19 @@ def ppo_update(
             with torch.no_grad():
                 # K3 estimator: non-negative, lower variance.
                 approx_kl = ((ratio - 1.0) - log_ratio).mean().item()
+                # Per-class entropy: bucket the per-step entropies by
+                # action_class and accumulate sum + count.
+                for cls in range(N_ACTION_CLASSES):
+                    mask = (mb.action_class == cls)
+                    if mask.any():
+                        ent_by_class_sum[cls] += float(per_step_entropy[mask].sum().item())
+                        ent_by_class_n[cls] += int(mask.sum().item())
 
             stats["pg_loss"] += float(pg_loss.item())
             stats["v_loss"] += float(v_loss.item())
-            stats["entropy"] += float(entropy.item())
+            stats["entropy"] += float(entropy_unweighted.item())
+            stats["aux_opp_hand_loss"] += float(aux_oh_loss.item())
+            stats["aux_margin_loss"] += float(aux_m_loss.item())
             stats["approx_kl"] += float(approx_kl)
             stats["n"] += 1
 
@@ -367,8 +487,23 @@ def ppo_update(
             break
 
     if stats["n"]:
-        for k in ("pg_loss", "v_loss", "entropy", "approx_kl"):
+        for k in (
+            "pg_loss", "v_loss", "entropy",
+            "aux_opp_hand_loss", "aux_margin_loss", "approx_kl",
+        ):
             stats[k] /= stats["n"]
+    # Per-class entropy means for diagnostics (NaN where unobserved).
+    stats["entropy_by_class"] = {
+        ACTION_CLASS_NAMES[cls]: (
+            ent_by_class_sum[cls] / ent_by_class_n[cls]
+            if ent_by_class_n[cls] > 0 else float("nan")
+        )
+        for cls in range(N_ACTION_CLASSES)
+    }
+    stats["count_by_class"] = {
+        ACTION_CLASS_NAMES[cls]: ent_by_class_n[cls]
+        for cls in range(N_ACTION_CLASSES)
+    }
     return stats
 
 
@@ -424,7 +559,17 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
     model = PolicyValueNet().to(device)
     if cfg.init_ckpt:
         state = torch.load(cfg.init_ckpt, map_location=device, weights_only=False)
-        model.load_state_dict(state["model"])
+        # strict=False because models trained before the UNREAL aux heads
+        # were added (PR adding `aux_opp_hand_head` + `aux_margin_head`)
+        # have no entries for those parameter names. The aux heads stay
+        # at their (small) random init and start learning from scratch.
+        missing, unexpected = model.load_state_dict(state["model"], strict=False)
+        if missing or unexpected:
+            print(
+                f"  ckpt-load: missing={list(missing)[:4]} "
+                f"(showing up to 4 of {len(missing)})  "
+                f"unexpected={list(unexpected)[:4]} (of {len(unexpected)})"
+            )
         src_iter = state.get("iter")
         src_wrg = state.get("wr_greedy")
         print(
@@ -501,11 +646,22 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
         c_entropy = _adapt_c_entropy(cfg, c_entropy, stats["entropy"])
         dt = time.perf_counter() - t0
 
+        # Per-class entropy line (only show classes that appeared this iter
+        # to keep the log readable).
+        ent_by_class = stats.get("entropy_by_class", {})
+        count_by_class = stats.get("count_by_class", {})
+        ent_parts = [
+            f"{name}={ent_by_class[name]:.2f}"
+            for name in ACTION_CLASS_NAMES
+            if count_by_class.get(name, 0) > 0
+        ]
         msg = (
             f"[iter {it:4d}] games={cfg.games_per_iter} trans={len(all_records)} "
             f"rollout_wr={rollout_wr:.2f} "
             f"pg={stats['pg_loss']:.3f} v={stats['v_loss']:.3f} "
             f"ent={stats['entropy']:.3f} c_ent={c_entropy:.4f} kl={stats['approx_kl']:.4f} "
+            f"aux_oh={stats['aux_opp_hand_loss']:.3f} aux_m={stats['aux_margin_loss']:.3f} "
+            f"ent_by_cls=[{' '.join(ent_parts)}] "
             f"stop@ep={stats['stopped_at_epoch']} dt={dt:.1f}s"
         )
         print(msg)
@@ -520,6 +676,13 @@ def train(cfg: TrainConfig | None = None) -> PolicyValueNet:
             "pg_loss": stats["pg_loss"],
             "v_loss": stats["v_loss"],
             "entropy": stats["entropy"],
+            # Per-action-type diagnostics — needed to spot mode collapse
+            # before it fully sets in (DRAFT entropy crashing toward 0 is
+            # the early signal we missed in the 20260523-123850 run).
+            "entropy_by_class": stats.get("entropy_by_class", {}),
+            "count_by_class": stats.get("count_by_class", {}),
+            "aux_opp_hand_loss": stats.get("aux_opp_hand_loss", 0.0),
+            "aux_margin_loss": stats.get("aux_margin_loss", 0.0),
             "c_entropy": c_entropy,
             "approx_kl": stats["approx_kl"],
             "stopped_at_epoch": stats["stopped_at_epoch"],

@@ -59,7 +59,7 @@ def main() -> None:
     device = _resolve_device(args.device)
     model = PolicyValueNet().to(device)
     state = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(state["model"])
+    model.load_state_dict(state["model"], strict=False)
     model.eval()
 
     cfg = GameConfig(seed=args.seed, max_turns=200)

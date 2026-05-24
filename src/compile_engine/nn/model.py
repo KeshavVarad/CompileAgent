@@ -139,6 +139,24 @@ class PolicyValueNet(nn.Module):
         nn.init.normal_(self.value_head[-2].weight, mean=0.0, std=0.01)
         nn.init.zeros_(self.value_head[-2].bias)
 
+        # UNREAL-style auxiliary prediction heads. Train-time only — they
+        # share the trunk's state representation but don't feed back into
+        # action selection. The heads are deliberately small (~5k params
+        # for the margin head, ~24k for the opp-hand head at hidden=256 /
+        # CARD_VOCAB_SIZE=92) so they don't dominate the parameter budget.
+        # See docs/STRATEGY_THESIS_sparkv4.md "credit assignment" section
+        # for the motivation.
+        self.aux_opp_hand_head = nn.Linear(hidden, CARD_VOCAB_SIZE)
+        nn.init.normal_(self.aux_opp_hand_head.weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.aux_opp_hand_head.bias)
+        self.aux_margin_head = nn.Sequential(
+            nn.Linear(hidden, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1),
+        )
+        nn.init.normal_(self.aux_margin_head[-1].weight, mean=0.0, std=0.01)
+        nn.init.zeros_(self.aux_margin_head[-1].bias)
+
     def lookup_card(self, token_ids: torch.Tensor) -> torch.Tensor:
         """Card token → (learned embedding ‖ static features). Static features
         for PAD (0) and HIDDEN (1) are zeros, so they contribute nothing."""
@@ -237,11 +255,19 @@ class PolicyValueNet(nn.Module):
         action_proto_ids: torch.Tensor,
         action_extra_card_ids: torch.Tensor,
         action_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (logits, value).
+        *,
+        return_aux: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Returns (logits, value), or (logits, value, aux) when return_aux=True.
 
         logits: [B, MAX_ACTIONS] — masked (padded entries set to -1e9).
         value:  [B]              — scalar in [-1, +1].
+        aux:    dict with
+                  "opp_hand_logits": [B, CARD_VOCAB_SIZE] — logits for the
+                    auxiliary "predict opponent's hand contents" supervised
+                    head. Used only at training time; produces no behaviour.
+                  "margin": [B] — auxiliary regression of the final
+                    (agent_compiles − opp_compiles) signed margin.
         """
         dense = self.encode_state_dense(state_batch)
         h = self.state_ln(self.state_trunk(dense))         # [B, hidden]
@@ -254,4 +280,10 @@ class PolicyValueNet(nn.Module):
         logits = logits.masked_fill(~action_mask, -1e9)
 
         value = self.value_head(h).squeeze(-1)              # [B]
-        return logits, value
+        if not return_aux:
+            return logits, value
+        aux = {
+            "opp_hand_logits": self.aux_opp_hand_head(h),    # [B, CARD_VOCAB_SIZE]
+            "margin": self.aux_margin_head(h).squeeze(-1),   # [B]
+        }
+        return logits, value, aux

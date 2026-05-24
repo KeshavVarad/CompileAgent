@@ -60,6 +60,23 @@ def main() -> None:
                     help="Optional warm-start: path to a snapshot_*.pt file. "
                          "PPO and AZ trainers share the snapshot format, so "
                          "you can hand an AZ checkpoint to PPO here.")
+    # Per-action-type entropy multipliers — DRAFT defaults to 4x to counter
+    # the mode collapse documented in docs/STRATEGY_THESIS_sparkv4.md.
+    ap.add_argument("--draft-entropy-mult", type=float, default=4.0,
+                    help="multiplier on c_entropy for DRAFT decisions only. "
+                         "set high (4-8) to keep draft exploration alive — "
+                         "Spark v4 collapsed Darkness to 98%% under mult=1.")
+    ap.add_argument("--choose-entropy-mult", type=float, default=2.0,
+                    help="multiplier on c_entropy for CHOOSE_TARGET decisions. "
+                         "boosts exploration of optional clauses (Love 1 End "
+                         "was rejected 47/47 times under mult=1).")
+    # UNREAL-style aux loss coefficients.
+    ap.add_argument("--c-aux-opp-hand", type=float, default=0.05,
+                    help="coefficient on auxiliary 'predict opp's hand "
+                         "contents' BCE loss. 0 disables the aux head.")
+    ap.add_argument("--c-aux-margin", type=float, default=0.05,
+                    help="coefficient on auxiliary 'predict final compile "
+                         "margin' regression loss. 0 disables.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
@@ -84,6 +101,15 @@ def main() -> None:
         pfsp_min_weight=args.pfsp_min_weight,
         pfsp_window=args.pfsp_window,
         init_ckpt=args.init_ckpt,
+        # Order matches ACTION_CLASS_NAMES: DRAFT, PLAY, CHOOSE, COMPILE,
+        # DISCARD, SHIFT. Only DRAFT and CHOOSE are exposed as CLI knobs;
+        # the others stay at 1.0 (standard entropy bonus).
+        per_class_entropy_mult=(
+            args.draft_entropy_mult, 1.0, args.choose_entropy_mult,
+            1.0, 1.0, 1.0,
+        ),
+        c_aux_opp_hand=args.c_aux_opp_hand,
+        c_aux_margin=args.c_aux_margin,
     )
     train(cfg)
 
