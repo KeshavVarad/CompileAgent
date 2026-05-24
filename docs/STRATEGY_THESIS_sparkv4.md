@@ -43,10 +43,16 @@ below. Specifically:
    rate across 2,398 opportunities (greedy + random eval).
 6. **Refresh almost never.** 2-3% wasteful-refresh rate — almost every
    refresh is a forced one (empty hand).
-7. **Love is the secret weapon.** Love cards (especially Love 6, 5, 4, 3)
-   appear *substantially more often* in wins than losses. Without the
-   AX01 expansion in the pool, WR drops from 68% to 55%. This holds
-   up under counterfactual (blocking Love costs a few WR points).
+7. **Love is *not* a secret weapon — it's correlation, not causation.**
+   Love cards appear more in wins than losses (Love 6 +1.5% delta,
+   Love 5 +1.0%, etc.), but blocking Love from the draft *raises* WR
+   by 4pp. Replay analysis confirms only Love 2 (free refresh) and
+   Love 5 (standard value-5) are clearly well-used. **Love 1's End
+   trade is rejected 47/47 times** (a free +1-card swing left on the
+   table); **Love 3's "give 1 to opp" is roughly random** (model
+   gives value-5 cards 20% of the time when it should give junk).
+   The player-base view that Love is mid-tier holds up. See
+   [What is the model actually using Love cards for?](#what-is-the-model-actually-using-love-cards-for).
 8. **Structural counter: Mirror exists but is weak (~3pp).** Darkness/
    Mirror matchup is 58% vs baseline 61%. Take it if available, but
    don't expect it to flip the game.
@@ -244,7 +250,7 @@ Sparkv3 had a 62.1% face-up ratio under similar eval. Spark v4 is
 **+11.7pp more aggressive** on face-up play — meaningfully different
 strategic identity.
 
-### 5. Love is the secret weapon — cards that win, vs cards you just play.
+### 5. Love correlates with wins — but doesn't cause them.
 
 Top-15 per-decision card-usage deltas (wins minus losses, vs greedy):
 
@@ -265,23 +271,28 @@ Top-15 per-decision card-usage deltas (wins minus losses, vs greedy):
 | MN02:Ice:5 | 67 | 62 | -0.7% | |
 
 **Four of the top eight winning-cards are Love (3, 4, 5, 6).**
-That's a striking concentration — the model is winning *via Love*
-when Love is on the field, even though Love is only its third-most
-drafted protocol (45%). Conversely, Darkness shows up in losses more
-often than in wins relative to play volume. Darkness is the
-*structural commitment* (drafted 98%) but Love is the *blade* —
-when the agent has Love, it converts.
+That's a striking *correlation*, but later analysis
+([What is the model actually using Love cards for?](#what-is-the-model-actually-using-love-cards-for))
+shows it's mostly *selection*, not causation: the model gives the same
+correct answers as competitive Compile players about which Love cards
+are useful (Love 2's refresh, Love 5's value-5) and makes clear
+mistakes on the others (Love 1's End trade never taken; Love 3's "give
+1" is roughly random and parts with value-5 cards 20% of the time).
 
 The "by config" slice in
 [`h2h_breakdown_vs_greedy.txt`](../runs/20260523-123850-ppo-resume/eval/snapshot_00040/h2h_breakdown_vs_greedy.txt)
-makes this concrete:
+shows a strong-looking effect:
 
 - **WR with AX01 expansion in pool: 68.2%** (n=192)
 - **WR without AX01 expansion: 55.3%** (n=208)
 
-A **+12.9pp drop when Love (and the rest of AX01) is unavailable.**
-The agent's identity is *Darkness + Love*; remove Love and the win
-condition narrows.
+A 12.9pp drop when AX01 is unavailable. **But this isn't really about
+Love** — AX01 also adds Apathy, Hate, Death, Light, Spirit, Speed, and
+several other protocols. The counterfactual block test rules out Love
+as the load-bearing card. AX01's contribution to WR is probably a mix
+of (a) a deeper pool means more chances to draft the agent's
+*actually-good* picks (Plague's hand attack, Darkness's draw-3), and
+(b) random self-selection of weaker greedy lineups.
 
 ### 6. Mirror is the structural counter.
 
@@ -524,6 +535,49 @@ Darkness 5× more often than Love as first-pick but gets a *worse*
 win rate by it. The model has not discovered an optimal draft;
 it has discovered a *consistent* draft.
 
+### What is the model actually using Love cards for?
+
+The Love cards are widely seen by Compile players as below-tier: many
+of them have "your opponent draws" or "give a card to opponent" clauses
+that look like pure downsides. The PR #43 doc claimed "Love is the
+secret weapon" based on the top per-decision card-usage deltas
+(Love 6 +1.5%, Love 5 +1.0%, Love 4 +0.7%, Love 3 +0.7%). The
+counterfactual block test then showed Love isn't load-bearing either
+(blocking Love +4pp WR). So what's actually happening?
+
+We replayed 100 games and captured every face-up Love play + every
+CHOOSE_TARGET decision triggered by a Love effect. Findings, per card:
+
+| Love card | face-up rate | what the model gains |
+|---|---:|---|
+| **Love 2** (opp draws 1; **you refresh**) | **82%** | The clear win — refresh is a free action you'd normally pay a turn for. Agent plays it face-up when hand is low (avg 3.2 cards). Net swing: opp +1, you +2-5 (whatever your refresh draws). **Correctly used.** |
+| **Love 5** (value-5; you discard 1) | 72% | Standard value-5: +3 line value for one discard. WR 71% face-up vs 57% face-down — agent has correctly learned this is worth the cost. **Correctly used.** |
+| **Love 6** (opp draws 2) | 80% | Defensible: face-up = +4 line value vs +2 opp hand cards. If opp's hand is already ≥4 cards, the extra draws partially go to forced discards. But there's selection bias in the WR gap (70% face-up vs 58% face-down) — agent may play face-up when already winning. |
+| **Love 3** (steal random; **give 1**) | 73% | **Sub-optimally used.** Agent's "give 1" choice averages value **2.64**, hand average **2.53**, normalized rank **0.44** — essentially random. **20% of the time the agent gives a value-5 card.** A strategic player gives junk. |
+| **Love 4** (reveal 1; flip 1) | 73% | Mixed. The reveal cost is small, the flip gain depends on target — agent's flip targets are often *its own* Darkness 3 face-up (perhaps to protect against opp's flip-down effects, or to enable Apathy 0's +1-per-face-down scaling). |
+| **Love 1** (draw opp's deck top; End: may give-1-draw-2) | 54% | The middle is mostly value (deck-top steal is +1 card from opp's pool). The **End trade ("give 1, draw 2 = net +1") is REJECTED 47 / 47 times we observed it**. Clear sub-optimality — a free hand-card swing left on the table. |
+
+The honest read:
+
+- **Love 2 and Love 5 are objectively decent cards.** Love 2 is a
+  refresh-with-line-value combo; Love 5 is the standard value-5.
+- **Love 6 is a defensible value-vs-tempo trade**, but the WR gap
+  attributed to it is partly selection (model plays face-up when
+  already ahead).
+- **Love 3 and Love 1's optional clauses are mis-played** — the
+  model doesn't understand that "give one" means "give junk," and
+  never takes positive-EV trades.
+- **The "Love is the secret weapon" framing in PR #43 was wrong.**
+  Love correlates with wins because the agent drafts it 45% of the
+  time, plays a lot of Love cards in winning games, and wins games
+  for *other* reasons (Darkness's draw-3, perfect compile discipline,
+  fast game length). The counterfactual confirms: when blocked from
+  drafting Love, the agent wins *more*, not less.
+- The player base's view that **Love cards are mostly low-tier** is
+  largely vindicated. The model has not discovered a hidden synergy;
+  it has only correctly recognized that Love 2 and Love 5 are usable
+  filler.
+
 ### What it does when it can't have Darkness
 
 Per the seat-conditional breakdown:
@@ -561,10 +615,14 @@ exploitable patterns are:
    ~50 its WR drops below 55%. Refresh more, play face-down more,
    force the game into late-game where every action has to clear
    a stack the bot has already invested cards into.
-3. **Watch for Love plays as a tempo gauge.** When the bot plays
-   Love cards 4-6, it's executing its win condition. These are the
-   highest-leverage cards for the bot — disrupt them with
-   discards/flip-downs/hate.
+3. **Don't fear the bot's Love plays.** The agent draws Love cards
+   often (drafted 45%) but mis-plays the optional clauses (Love 1's
+   End trade is rejected 47/47, Love 3's "give 1" is roughly random).
+   Most of the Love-card volume in winning games is correlation, not
+   the bot executing a synergy. Only Love 2 (free refresh) and Love 5
+   (standard value-5) are clearly well-used. Spend disruption on
+   **Plague 2/3/4 and Darkness 0** instead — those are the real
+   load-bearing cards.
 
 ## Reproducibility
 
