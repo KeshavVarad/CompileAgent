@@ -897,7 +897,10 @@ export class Game {
         for (let ln = 0; ln < 3; ln++) {
           for (const pl of [0, 1] as PlayerIndex[]) {
             const s = lineStack(st.lines[ln], pl);
-            if (s.includes(c) && c.faceUp) {
+            // Codex: "Flip:" emphasis and "When this card would be
+            // flipped" triggers fire on ANY flip direction (including
+            // face-up → face-down). Don't filter on `c.faceUp`.
+            if (s.includes(c)) {
               const fn = getFlipTriggerEffect(c.defId);
               if (fn) { this.pushEffect(fn(st, pl, ln, c), c); pushedAny = true; }
               break;

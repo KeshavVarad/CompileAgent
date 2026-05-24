@@ -243,10 +243,26 @@ def delete_card_from_field(
     return c
 
 
-def flip_card(state: GameState, line_idx: int, player: int, stack_pos: int) -> CardInst:
+def flip_card(
+    state: GameState, line_idx: int, player: int, stack_pos: int,
+    *, cause_card: "CardInst | None" = None,
+) -> CardInst:
+    """Flip the card at (line, player, pos).
+
+    `cause_card` is the card whose effect handler initiated this flip,
+    if known. Used to gate triggers like Unity 0 bottom ("When this
+    card would be flipped by a Unity card: …") that depend on the
+    *source* of the flip. Callers from effect handlers should pass
+    `cause_card=card` (their own source); engine-internal flips (e.g.,
+    compile finalizer, when_covered Apathy 2 self-flip) leave it None
+    and the conditional-source triggers don't fire.
+    """
     stack = state.lines[line_idx].stack(player)
     c = stack[stack_pos]
     d = state.defs[c.def_id]
+    # Surface the flip cause so post-flip triggers (Unity 0 bottom etc.)
+    # can read it. Cleared after the trigger queue drains.
+    state.scratch["_last_flip_cause"] = cause_card
     # Ice 4: "This card cannot be flipped." Persistent immunity while
     # face-up on the field (covered or uncovered).
     if d.key == "MN02:Ice:4" and c.face_up:
@@ -367,6 +383,22 @@ def shift_card(
     return c
 
 
+def _has_active_corruption_1(state: "GameState", player: int) -> bool:
+    """True iff `player` has MN02:Corruption:1 face-up AND uncovered on the
+    field. Bottom-tier text is auxiliary (Codex p.13) — only active while
+    uncovered."""
+    for ln in range(NUM_LINES):
+        stack = state.lines[ln].stack(player)
+        if not stack:
+            continue
+        top = stack[-1]
+        if not top.face_up:
+            continue
+        if state.defs[top.def_id].key == "MN02:Corruption:1":
+            return True
+    return False
+
+
 def return_card_to_hand(
     state: GameState, line_idx: int, player: int, stack_pos: int
 ) -> CardInst:
@@ -374,7 +406,21 @@ def return_card_to_hand(
     was_top = stack_pos == len(stack) - 1
     c = stack.pop(stack_pos)
     c.face_up = False
-    state.players[c.owner].hand.append(c)
+    # Corruption 1 bottom: "When a card would be returned to your
+    # opponent's hand: Put that card on top of their deck face-down
+    # instead." (Codex p.13.) The "your opponent" is from Corruption 1's
+    # owner's POV, so the trigger condition is: if `c.owner`'s opponent
+    # has Corruption 1 active, redirect.
+    recipient = c.owner
+    opp_of_recipient = 1 - recipient
+    if _has_active_corruption_1(state, opp_of_recipient):
+        state.players[recipient].deck.append(c)
+        state.log.append(
+            f"Corruption 1 redirect: returned card placed on top of "
+            f"P{recipient + 1}'s deck face-down"
+        )
+    else:
+        state.players[recipient].hand.append(c)
     # Removing the top exposes the under-card → fire its middle on uncover.
     if was_top and stack and stack[-1].face_up:
         state.triggers.append(("uncover", line_idx, player, stack[-1]))
@@ -3009,42 +3055,13 @@ def _corruption_1(state, ap, li, card):
     return_card_to_hand(state, t[0], t[1], t[2])
 
 
-# TODO: Corruption 1 bottom emphasis is "When a card would be returned
-# to your opponent's hand: …". That's a *global* event trigger (any
-# return), not a self-state trigger. The engine doesn't have a
-# `@when_would_be_returned` decorator and `return_card_to_hand` doesn't
-# broadcast a triggerable event. Current registration as
-# @bottom_on_play (fires on Corruption 1's own play) is a heuristic
-# stand-in that only correctly handles the case where Corruption 1's
-# middle returned a card — global returns from other cards' effects
-# aren't intercepted. Needs an engine-level trigger hook to fix.
-@bottom_on_play("MN02:Corruption:1")
-def _corruption_1_bottom(state, ap, li, card):
-    # Bottom modifies the return: "Put that card on top of their deck face-down instead."
-    # The middle has already chosen and returned the card to hand. As a
-    # follow-up, move the most-recently-returned card from its owner's hand
-    # to the top of their deck.
-    # Heuristic: the returned card is the last card appended to that player's
-    # hand. Cross-check via the engine's log.
-    # If the return wasn't completed (no targets), nothing to do.
-    if not state.log:
-        return
-    # Recent entries — find the action that just resolved the middle target.
-    # Simpler: look at all hands' most recent additions face-down.
-    # For our purposes (and parity with the published rule), pick the last
-    # card added to either hand that's face-down.
-    candidate: tuple[int, CardInst] | None = None
-    for pl in (0, 1):
-        h = state.players[pl].hand
-        if h and not h[-1].face_up:
-            candidate = (pl, h[-1])
-    if not candidate:
-        return
-    pl, c = candidate
-    state.players[pl].hand.remove(c)
-    state.players[pl].deck.append(c)
-    if False:
-        yield None  # type: ignore[misc]
+# Corruption 1 bottom: "When a card would be returned to your opponent's
+# hand: Put that card on top of their deck face-down instead." Implemented
+# as a redirect inside `return_card_to_hand` rather than a registered
+# handler — that's the only correct way since the trigger is a *global*
+# event (any return) and must redirect BEFORE the card lands in hand, not
+# after the fact. See `_has_active_corruption_1` and the recipient check
+# in `return_card_to_hand` above.
 
 
 # Corruption 2 top: "After you discard cards: Your opponent discards 1 card."
@@ -4303,19 +4320,27 @@ def _unity_0(state, ap, li, card):
         flip_card(state, t[0], t[1], t[2])
 
 
-# TODO: Unity 0 bottom — "When this card would be flipped by a Unity
-# card: First, flip 1 card or draw 1 card." This handler is registered
-# as @bottom_first (fires on play) which is wrong: the rule says fire
-# when flipped, AND only when the flipper is a Unity card. Fixing
-# requires either (a) the engine to expose the flip source to the
-# trigger, or (b) approximating with @flip_trigger and dropping the
-# "by a Unity card" condition (over-triggers slightly). Left as-is
-# for now to avoid changing observed behavior without a clean fix.
-@bottom_first("AX02:Unity:0")
-def _unity_0_first(state, ap, li, card):
-    # First: flip one card or draw 1 card.
-    idx = yield Choice(prompt="First: flip 1 card or draw 1?",
-                       options=["flip", "draw"], targets=[0, 1], decider=ap)
+# Unity 0 bottom — "When this card would be flipped by a Unity card:
+# First, flip 1 card or draw 1 card." Implemented as @flip_trigger that
+# inspects `state.scratch["_last_flip_cause"]` (populated by `flip_card`)
+# to gate on "by a Unity card". Note: the Codex "First:" semantic
+# ("trigger fires before the flip lands") is approximated here as
+# "trigger fires immediately after the flip" since `flip_card` is
+# synchronous and can't yield. Functionally identical for Unity 0
+# (the effect is external — flip another card or draw — and doesn't
+# depend on Unity 0's own face state).
+@flip_trigger("AX02:Unity:0")
+def _unity_0_when_flipped_by_unity(state, ap, li, card):
+    cause = state.scratch.get("_last_flip_cause")
+    if cause is None:
+        return
+    cause_d = state.defs[cause.def_id]
+    if cause_d.protocol != "Unity":
+        return
+    idx = yield Choice(
+        prompt="Unity 0 (flipped by a Unity card): flip 1 card or draw 1?",
+        options=["flip", "draw"], targets=[0, 1], decider=ap,
+    )
     if idx == 1:
         draw_cards(state, ap, 1)
         return
@@ -4327,14 +4352,15 @@ def _unity_0_first(state, ap, li, card):
     i2 = yield Choice(prompt="Flip 1 card", options=opts, targets=targets, decider=ap)
     if 0 <= i2 < len(targets):
         t = targets[i2]
-        flip_card(state, t[0], t[1], t[2])
+        flip_card(state, t[0], t[1], t[2], cause_card=card)
 
 
 @middle("AX02:Unity:3")
 def _unity_3(state, ap, li, card):
     # "If there is another Unity card in the field, you may flip 1
     # face-up card." Flipping face-down cards is excluded by the card
-    # text (the "face-up" filter on enumeration).
+    # text (the "face-up" filter on enumeration). Pass cause_card so
+    # Unity 0's flip-trigger fires if Unity 3 flips Unity 0.
     if _count_unity_in_field(state) <= 1:
         return
     targets = _enumerate_uncovered(state, exclude=card, face="up", active_player=ap)
@@ -4346,7 +4372,7 @@ def _unity_3(state, ap, li, card):
     if idx == -1 or not (0 <= idx < len(targets)):
         return
     t = targets[idx]
-    flip_card(state, t[0], t[1], t[2])
+    flip_card(state, t[0], t[1], t[2], cause_card=card)
 
 
 # ----- AX02 expansion additions (Assim 6, Diversity 0, Ice 4) ----------

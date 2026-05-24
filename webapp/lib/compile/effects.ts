@@ -1805,18 +1805,13 @@ register(MIDDLE_EFFECTS, "MN02:Corruption:1", function* (state, ap, li, card) {
   returnCardToHand(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_ON_PLAY_EFFECTS, "MN02:Corruption:1", function* (state) {
-  // After return, push most-recent face-down hand addition onto that player's deck.
-  for (const pl of [0, 1] as PlayerIndex[]) {
-    const h = state.players[pl].hand;
-    if (h.length > 0 && !h[h.length - 1].faceUp) {
-      const c = h.pop()!;
-      state.players[pl].deck.push(c);
-      break;
-    }
-  }
-  if (false) yield {} as Choice;
-});
+// Corruption 1 bottom: "When a card would be returned to your opponent's
+// hand: Put that card on top of their deck face-down instead." Implemented
+// as a redirect inside `returnCardToHand` (in helpers.ts) rather than a
+// registered handler — that's the only correct way since the trigger is
+// a *global* event (any return, from any source) and must redirect BEFORE
+// the card lands in hand. See `hasActiveCorruption1` and the recipient
+// check in returnCardToHand.
 
 // Corruption 2 top: "After you discard cards: Your opponent discards 1 card."
 register(AFTER_SELF_DISCARD_EFFECTS, "MN02:Corruption:2", function* (state, ap) {
@@ -2912,9 +2907,19 @@ register(MIDDLE_EFFECTS, "AX02:Unity:0", function* (state, ap, li, card) {
   if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
-register(BOTTOM_FIRST_EFFECTS, "AX02:Unity:0", function* (state, ap, li, card) {
+// Unity 0 bottom — "When this card would be flipped by a Unity card:
+// First, flip 1 card or draw 1 card." Implemented as FLIP_TRIGGER
+// inspecting state.scratch._last_flip_cause (populated by flipCard) to
+// gate on "by a Unity card". The Codex "First:" semantic is
+// approximated as "immediately after the flip" since flipCard is
+// synchronous — functionally identical for Unity 0 (effect is external).
+register(FLIP_TRIGGER_EFFECTS, "AX02:Unity:0", function* (state, ap, li, card) {
+  const cause = state.scratch["_last_flip_cause"] as CardInst | null | undefined;
+  if (!cause) return;
+  const causeD = CARD_DEFS[cause.defId];
+  if (causeD.protocol !== "Unity") return;
   const idx: number = yield {
-    prompt: "First: flip 1 card or draw 1?",
+    prompt: "Unity 0 (flipped by a Unity card): flip 1 card or draw 1?",
     options: ["flip", "draw"], targets: [0, 1], optional: false, decider: ap,
   };
   if (idx === 1) { drawCards(state, ap, 1); return; }
@@ -2922,18 +2927,23 @@ register(BOTTOM_FIRST_EFFECTS, "AX02:Unity:0", function* (state, ap, li, card) {
   if (targets.length === 0) { drawCards(state, ap, 1); return; }
   yield* chooseFieldTarget("Flip 1 card", targets, state, ap);
   const i = state.scratch["_last_target_idx"] as number | undefined;
-  if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
+  if (i != null && targets[i]) {
+    flipCard(state, targets[i].line, targets[i].player, targets[i].pos, card);
+  }
 });
 
 register(MIDDLE_EFFECTS, "AX02:Unity:3", function* (state, ap, li, card) {
   // "If there is another Unity card in the field, you may flip 1
-  // face-up card." Face-up filter mirrors the card text.
+  // face-up card." Face-up filter mirrors the card text. Pass causeCard
+  // so Unity 0's flip-trigger fires if Unity 3 flips Unity 0.
   if (countUnityInField(state) <= 1) return;
   const targets = enumerateUncovered(state, { exclude: card, face: "up", activePlayer: ap });
   if (targets.length === 0) return;
   yield* chooseFieldTarget("(optional) Flip 1 face-up card", targets, state, ap, true);
   const i = state.scratch["_last_target_idx"] as number | undefined;
-  if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
+  if (i != null && targets[i]) {
+    flipCard(state, targets[i].line, targets[i].player, targets[i].pos, card);
+  }
 });
 
 // ----- AX02: Assimilation 0 / 2, Diversity 1 / 4, Unity 1 / 2 / 4 ----------

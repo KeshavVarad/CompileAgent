@@ -1068,6 +1068,10 @@ class Game:
                 )
 
         # Flip triggers — list of card refs (the cards that flipped).
+        # NOTE: Codex specifies "Flip:" emphasis and "When this card would
+        # be flipped" triggers fire on ANY flip direction (including
+        # face-up → face-down). Don't filter on `c.face_up` here — the
+        # handler can introspect orientation itself if it cares.
         flip_list = st.scratch.pop("_pending_flip_cards", None)
         if flip_list:
             for c in flip_list:
@@ -1075,7 +1079,7 @@ class Game:
                 for ln in range(NUM_LINES):
                     for pl in (0, 1):
                         s = st.lines[ln].stack(pl)
-                        if c in s and c.face_up:
+                        if c in s:
                             d = st.defs[c.def_id]
                             fn = get_flip_trigger_effect(d)
                             if fn is not None:
