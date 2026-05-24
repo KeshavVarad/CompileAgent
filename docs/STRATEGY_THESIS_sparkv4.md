@@ -18,28 +18,38 @@ pipeline that produced the numbers below).
 
 ## TL;DR
 
-Spark v4 has converged on a **fast-aggressive, hand-disruption** thesis
-that differs sharply from Sparkv3's defensive-control thesis:
+Spark v4 has converged on a **fast-aggressive, hand-disruption** play
+style, but the *draft* portion of its thesis is mostly self-reinforced
+mode collapse — see
+[Counterfactual analysis](#counterfactual-analysis--is-the-darkness-draft-real)
+below. Specifically:
 
-1. **Draft mono-thesis: Darkness first, always.** First or second pick
-   in 98% of games (avg pick position 1.49 of 3). Plague + Love fill
-   the other slots.
-2. **Push for 3-compiles fast.** Wins 79% of games that end in under 41
-   turns; only 54% of games that go past 68 turns. The strategy is to
-   race, not to grind.
-3. **Trade tempo for information by playing face-up.** 73.8% of plays
-   in wins are face-up; the model has decided the synergy value of
+1. **Draft pool-presence: Darkness in 98% of games.** But the
+   counterfactual shows this is **not load-bearing** — blocking
+   Darkness from the agent's draft leaves WR essentially unchanged
+   (0.54 → 0.54 over 100 games). The agent's *play skill* is what's
+   doing the work; the draft preference is a mode-collapse artifact
+   of self-play.
+2. **First-pick is seat-dependent.** As Seat 0 (picks first in the
+   snake): Darkness 43%, Plague 20%, Love 12%. As Seat 1 (picks second
+   after greedy random-picks): Darkness 82%. The pool-presence rate
+   averages these out to 98%.
+3. **Push for 3 compiled lines fast.** Wins 79% of games under 41
+   turns; only 54% past 68 turns. The strategy is to race, not grind.
+4. **Trade tempo for information by playing face-up.** 73.8% of plays
+   in wins are face-up — the model has decided the synergy value of
    revealing your card text beats the information cost.
-4. **Compile every time it's legal.** Perfect 100% compile-when-possible
+5. **Compile every time it's legal.** Perfect 100% compile-when-possible
    rate across 2,398 opportunities (greedy + random eval).
-5. **Refresh almost never.** 2-3% wasteful-refresh rate — almost every
+6. **Refresh almost never.** 2-3% wasteful-refresh rate — almost every
    refresh is a forced one (empty hand).
-6. **Love is the secret weapon.** Love cards (especially Love 6, 5, 4, 3)
+7. **Love is the secret weapon.** Love cards (especially Love 6, 5, 4, 3)
    appear *substantially more often* in wins than losses. Without the
-   AX01 expansion in the pool, WR drops from 68% to 55%.
-7. **Structural counter: Mirror.** When the opponent has Mirror in
-   their three protocols, Darkness's flip-heavy gameplan gets reflected
-   back — agent WR drops from its baseline 61% to ~58%.
+   AX01 expansion in the pool, WR drops from 68% to 55%. This holds
+   up under counterfactual (blocking Love costs a few WR points).
+8. **Structural counter: Mirror exists but is weak (~3pp).** Darkness/
+   Mirror matchup is 58% vs baseline 61%. Take it if available, but
+   don't expect it to flip the game.
 
 The model is **roughly tied with snapshot_00030 in ladder Elo** (1463
 vs 1469, within noise on 240 games per pair). Training curve plateaued
@@ -119,10 +129,13 @@ Across 50 iterations of PPO training with stochastic-strategy play
 Spark v4 settled on a *coherent* play style. Reading the action mix
 + draft preferences + h2h breakdown data, the thesis is:
 
-### 1. Darkness, always. The draft is solved.
+### 1. Darkness, always — but it's not because Darkness is best.
 
 Spark v4 has the most concentrated draft policy of any model we've
-trained:
+trained. **Per the counterfactual analysis [below](#counterfactual-analysis--is-the-darkness-draft-real),
+this concentration is mode-collapse — not an objectively-correct
+draft thesis.** Blocking Darkness from the agent's pool leaves WR
+unchanged. The agent's *play* is what's winning games, not its draft.
 
 | protocol | pick freq | avg pick pos (1-3) | vs sparkv3 baseline |
 |---|---:|---:|---|
@@ -181,21 +194,35 @@ when that fails, it underperforms grinding.
 
 Compile-count breakdown reinforces this:
 
-| (agent compiles, opp compiles) | WR | n |
+| (agent COMPILE_LINE actions, opp COMPILE_LINE actions) | WR | n |
 |---|---:|---:|
 | 3 - 1 | **100%** | 43 |
 | 3 - 2 | **100%** | 43 |
 | 4 - 2 | **100%** | 24 |
-| 3 - 3 | **34%** | 35 |
+| 3 - 3 | 34% | 35 |
 | 4 - 3 | 60% | 30 |
 | 2 - 3 | **0%** | 25 |
 | 3 - 4 | 9% | 23 |
 
-When the agent compiles 3 lines *before* the opponent gets to 3, it
-wins 100% of the time. The race is what matters. When both sides
-reach 3-3 (rules tiebreaker territory), the agent loses two thirds of
-those games — its style of play optimises for getting there first,
-not for winning the tiebreaker.
+The *win condition* in Compile is `all_compiled()` — all 3 of your
+lines marked compiled. The counts above are total **COMPILE_LINE
+actions**, which include **recompiles** (a COMPILE_LINE on a
+line you've already compiled steals the top card of the opponent's
+deck; see [`game.py:628-637`](../src/compile_engine/game.py#L628-L637)).
+There are no tiebreakers in Compile — the game ends when one side
+hits all 3 lines first, or via the timeout `leader_wins` policy if
+max_turns is reached.
+
+Read that way: the asymmetric rows (3-1, 3-2, 4-2 → 100% WR) are
+games where the agent reached `all_compiled()` cleanly. The mixed
+rows (3-3, 4-3, 3-4) are mostly games where at least one side burned
+COMPILE_LINE actions on recompiles instead of new lines — the deck-
+theft is valuable tempo but doesn't advance the win condition. When
+the agent took 3 compile actions and lost (the 34% in row "3-3"),
+it almost certainly had ≥1 recompile and was actually only at 2/3
+distinct lines compiled when opp finished. The agent's bias is to
+push the race; it's *less* efficient when it has to play the
+deck-theft sub-game.
 
 ### 4. Face-up by default. Information cost is worth it.
 
@@ -398,11 +425,16 @@ Figures are in [docs/sparkv4-figures/](sparkv4-figures/):
 
 ## Known limitations
 
-- **Mono-draft policy is exploitable.** A 98% Darkness pick rate means
-  an opponent who knows the bot can prepare a Mirror-heavy
-  counter-draft and dependably win that matchup. The Spark v4 →
-  human transition is not as defended against this as Sparkv3's
-  spread draft.
+- **Draft mode collapse (Darkness 98%) without an underlying edge.**
+  The counterfactual block test shows the agent wins just as much
+  *without* Darkness as with it. So while a human counter-drafting
+  Mirror feels like an exploit, the actual WR cost is small (~3pp).
+  The bigger issue is that the model **has not learned a draft
+  policy** — it has learned to pick the protocol it always picks.
+  Suggests a future training-time fix: add a draft-diversity bonus
+  to the entropy regulariser, or randomise the agent's draft
+  during self-play rollouts so the policy gets gradients on
+  non-Darkness lines.
 - **Plateaued at iter-30.** The training curve flattened (within-noise
   Elo from iter-30 onwards) — the model is **at the PPO ceiling for
   this hyperparameter regime, not for Compile**. Further gains likely
@@ -423,18 +455,112 @@ Figures are in [docs/sparkv4-figures/](sparkv4-figures/):
   late-game stabilisation. Sparkv3 had the same pattern; nothing in
   PPO training fixed it.
 
+## Counterfactual analysis — is the Darkness draft real?
+
+The headline draft finding ("Darkness 98% pick freq") is striking but
+ambiguous on its own. Two equally consistent stories:
+
+- **Story A (rational play):** Darkness is genuinely the strongest
+  protocol; the model has discovered an objective optimum. Drafting
+  it 98% is the right answer.
+- **Story B (mode collapse):** In self-play, both sides try to draft
+  Darkness; whoever grabs it gets to play with it and wins more often.
+  Over training, the policy gradient reinforces "draft Darkness" even
+  though the actual edge is small or zero. The model has no data on
+  what happens when it *doesn't* take Darkness, because it always does.
+
+To distinguish, we ran a **forced-block counterfactual**: a wrapper
+around the NN agent that filters DRAFT_PROTOCOL actions whose
+protocol is in a blocked set, then lets the underlying policy
+renormalise over what's left.
+
+Script:
+[`scripts/eval/counterfactual_draft.py`](../scripts/eval/counterfactual_draft.py).
+Results (100 games per condition, snapshot_00040 vs greedy, seed 0,
+stochastic both sides):
+
+| condition | WR | delta vs baseline |
+|---|---:|---:|
+| baseline (no restriction) | 0.540 | (ref) |
+| block Darkness | **0.540** | **+0.000** |
+| block Plague | 0.550 | +0.010 |
+| block Love | **0.580** | **+0.040** (!) |
+| block all three (Dark+Plague+Love) | 0.510 | −0.030 |
+
+**Story B is the right story.** Blocking Darkness — the protocol
+the agent picks 98% of the time, that its top 4 most-played cards
+are from — has *literally zero* effect on win rate. Blocking Love,
+the supposed "secret weapon," actually *raises* WR by 4pp (probably
+noise, but certainly not a load-bearing protocol either). Blocking
+all three top-drafted protocols costs only 3pp.
+
+**The model's "thesis" about Darkness is mostly illusion.** The
+model's actual skill — the part that beats greedy at 54-61% — lives
+in the **play decisions** (CHOOSE_TARGET, PLAY_FACE_UP / PLAY_FACE_DOWN
+ordering, COMPILE_LINE timing) rather than the draft. The draft has
+mode-collapsed onto Darkness because:
+
+1. Self-play with mutually informed opponents both want Darkness.
+2. The agent that grabs it first wins more games (selection signal).
+3. Gradient descent reinforces "pick Darkness."
+4. Once that habit forms, agent never plays games *without* Darkness,
+   so there's no gradient to learn alternative draft policies.
+5. The actual edge Darkness gives is ~0, but the model can't see
+   that because of step 4.
+
+Note also: the per-first-pick WR table (from the same 400-game eval)
+already hinted at this if you looked carefully —
+
+| agent's first pick | WR | n |
+|---|---:|---:|
+| Chaos | 0.750 | 12 |
+| **Love** | **0.647** | **34** |
+| **Darkness** | **0.627** | **249** |
+| Plague | 0.592 | 49 |
+| Ice | 0.571 | 28 |
+
+Love-first wins 64.7% vs Darkness-first 62.7%. The agent chooses
+Darkness 5× more often than Love as first-pick but gets a *worse*
+win rate by it. The model has not discovered an optimal draft;
+it has discovered a *consistent* draft.
+
+### What it does when it can't have Darkness
+
+Per the seat-conditional breakdown:
+
+- As Seat 0 (snake-draft picks first; sees full pool): Darkness 43%
+  first-pick, Plague 20%, Love 12%, Ice 10%, then a long tail. The
+  model spreads its first picks across the entire top draft tier.
+- As Seat 1 (picks second, after greedy random-picks): Darkness 82%
+  first-pick. Greedy's random pick rarely takes Darkness (and from a
+  pool of 10-24 protocols the chance Darkness was at slot 0 of greedy's
+  legal_actions is ~5-10%), so Darkness is almost always still
+  available.
+- When greedy *first*-picks Darkness (5/400 games): agent picks
+  Diversity, Time, or Love. WR 60% (small n) — agent adapts
+  reasonably. Confirms the model has *some* off-policy capability
+  when forced.
+
+The 98% pool-presence number is the *average* across both seats. As
+Seat 0, the agent often picks Darkness in its 4th or 5th snake-draft
+turn (when Darkness has survived to its pick) rather than first. The
+draft policy is "Darkness if available, ever" rather than "Darkness
+must be first."
+
 ## How to read this for human play
 
 If you're a human playing against Spark v4 on the webapp, the
 exploitable patterns are:
 
-1. **Draft Mirror.** It's the single most effective counter to
-   Darkness, the bot's must-pick. If you draft Mirror first, you
-   know the bot will draft Darkness; you've already neutralized 30%
-   of its win-condition.
+1. **Draft Mirror if it's in the pool.** Darkness/Mirror is one of
+   the bot's worst protocol matchups (~58% WR for the bot, vs ~61%
+   baseline). The effect is small (~3pp), but it's the largest
+   structural counter we've measured and it's free to take —
+   the bot will draft Darkness regardless.
 2. **Drag the game out.** The bot is a fast-game player. Past turn
    ~50 its WR drops below 55%. Refresh more, play face-down more,
-   force tiebreaker-territory.
+   force the game into late-game where every action has to clear
+   a stack the bot has already invested cards into.
 3. **Watch for Love plays as a tempo gauge.** When the bot plays
    Love cards 4-6, it's executing its win condition. These are the
    highest-leverage cards for the bot — disrupt them with
