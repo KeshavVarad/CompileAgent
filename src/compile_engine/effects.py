@@ -1201,7 +1201,7 @@ for _proto, _set in (
     ("Apathy", "AX01"), ("Hate", "AX01"), ("Love", "AX01"),
     # MN02 — every value-5 card in the new set also has "You discard 1 card."
     ("Chaos", "MN02"), ("Clarity", "MN02"), ("Corruption", "MN02"),
-    ("Courage", "MN02"), ("Ice", "MN02"), ("Luck", "MN02"),
+    ("Courage", "MN02"), ("Fear", "MN02"), ("Ice", "MN02"), ("Luck", "MN02"),
     ("Mirror", "MN02"), ("Peace", "MN02"), ("Smoke", "MN02"),
     ("Time", "MN02"), ("War", "MN02"),
     # AX02
@@ -3332,9 +3332,9 @@ def _fear_4(state, ap, li, card):
         yield None  # type: ignore[misc]
 
 
-@middle("MN02:Fear:5")
-def _fear_5(state, ap, li, card):
-    yield from _discard_n(state, ap, 1)
+# Fear 5 middle is "You discard 1 card." — same as every value-5 card,
+# already wired via the bulk `_value5_discard` registration above. No
+# per-card handler needed.
 
 
 # ---------------------------------------------------------------------------

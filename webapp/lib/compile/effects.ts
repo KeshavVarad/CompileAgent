@@ -211,8 +211,8 @@ for (const [proto, set] of [
   ["Apathy", "AX01"], ["Hate", "AX01"], ["Love", "AX01"],
   // MN02
   ["Chaos", "MN02"], ["Clarity", "MN02"], ["Corruption", "MN02"], ["Courage", "MN02"],
-  ["Ice", "MN02"], ["Luck", "MN02"], ["Mirror", "MN02"], ["Peace", "MN02"],
-  ["Smoke", "MN02"], ["Time", "MN02"], ["War", "MN02"],
+  ["Fear", "MN02"], ["Ice", "MN02"], ["Luck", "MN02"], ["Mirror", "MN02"],
+  ["Peace", "MN02"], ["Smoke", "MN02"], ["Time", "MN02"], ["War", "MN02"],
   // AX02
   ["Assimilation", "AX02"], ["Diversity", "AX02"], ["Unity", "AX02"],
 ] as const) {
@@ -395,6 +395,57 @@ register(MIDDLE_EFFECTS, "AX01:Love:6", function* (state, ap) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   drawCards(state, opp, 2);
   if (false) yield {} as Choice;
+});
+
+// Love 3 middle: take 1 random card from opp's hand; give 1 of yours to opp.
+register(MIDDLE_EFFECTS, "AX01:Love:3", function* (state, ap) {
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  if (state.players[opp].hand.length > 0) {
+    // Use the engine's RNG (rngState) for parity with Python.
+    const { rngInt } = require("./rng");
+    const rng = { state: state.rngState };
+    const idx = rngInt(rng, state.players[opp].hand.length);
+    state.rngState = rng.state;
+    const c = state.players[opp].hand.splice(idx, 1)[0];
+    c.owner = ap;
+    state.players[ap].hand.push(c);
+  }
+  const hand = state.players[ap].hand;
+  if (hand.length > 0) {
+    const opts = hand.map((c, i) => describeHandCard(state, ap, i));
+    const idx2: number = yield {
+      prompt: "Give 1 card to opponent", options: opts,
+      targets: Array.from({ length: hand.length }, (_, i) => i),
+      optional: false, decider: ap,
+    };
+    if (idx2 >= 0 && idx2 < hand.length) {
+      const g = hand.splice(idx2, 1)[0];
+      g.owner = opp;
+      state.players[opp].hand.push(g);
+    }
+  }
+});
+
+// Love 4 middle: reveal 1 card from hand (informational); flip 1 card.
+register(MIDDLE_EFFECTS, "AX01:Love:4", function* (state, ap) {
+  const hand = state.players[ap].hand;
+  if (hand.length > 0) {
+    const opts = hand.map((c, i) => describeHandCard(state, ap, i));
+    const idx: number = yield {
+      prompt: "Reveal 1 card from your hand", options: opts,
+      targets: Array.from({ length: hand.length }, (_, i) => i),
+      optional: false, decider: ap,
+    };
+    if (idx >= 0 && idx < hand.length) {
+      const d = CARD_DEFS[hand[idx].defId];
+      logInfo(state, `P${ap + 1} reveals ${d.protocol} ${d.value}`);
+    }
+  }
+  const targets = enumerateUncovered(state, { activePlayer: ap });
+  if (targets.length === 0) return;
+  yield* chooseFieldTarget("Flip 1 card", targets, state, ap);
+  const i = state.scratch["_last_target_idx"] as number | undefined;
+  if (i != null && targets[i]) flipCard(state, targets[i].line, targets[i].player, targets[i].pos);
 });
 
 // ---------------------------------------------------------------------------
@@ -917,6 +968,16 @@ register(MIDDLE_EFFECTS, "MN01:Light:2", function* (state, ap) {
     const curPos = lineStack(state.lines[t.line], t.player).indexOf(t.card);
     if (curPos >= 0) flipCard(state, t.line, t.player, curPos);
   }
+});
+
+// Light 4 middle: opponent reveals their hand (informational).
+register(MIDDLE_EFFECTS, "MN01:Light:4", function* (state, ap) {
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const hand = state.players[opp].hand
+    .map((c) => `${CARD_DEFS[c.defId].protocol} ${CARD_DEFS[c.defId].value}`)
+    .join(", ");
+  logInfo(state, `P${opp + 1} hand revealed: ${hand || "<empty>"}`);
+  if (false) yield {} as Choice;
 });
 
 register(MIDDLE_EFFECTS, "MN01:Light:3", function* (state, ap, li) {
@@ -1986,9 +2047,9 @@ register(MIDDLE_EFFECTS, "MN02:Fear:4", function* (state, ap) {
   if (false) yield {} as Choice;
 });
 
-register(MIDDLE_EFFECTS, "MN02:Fear:5", function* (state, ap) {
-  yield* discardN(state, ap, 1);
-});
+// Fear 5 middle is "You discard 1 card." — already wired via the bulk
+// `v5Discard` registration at the top of this file. No per-card handler
+// needed.
 
 // ----- MN02: Ice -----------------------------------------------------------
 
@@ -3176,3 +3237,4 @@ export function getWhenDeletedByCompileEffect(defId: number): EffectFn | null {
   const k = keyForDefId(defId);
   return k == null ? null : (WHEN_DELETED_BY_COMPILE_EFFECTS[k] ?? null);
 }
+
