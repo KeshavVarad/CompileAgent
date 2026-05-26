@@ -1683,14 +1683,9 @@ register(END_EFFECTS, "MN02:Chaos:4", function* (state, ap, li, card) {
 // Clarity 1 top: "Start: Reveal the top card of your deck. You may
 // discard the top card of your deck."
 register(START_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
+  // Codex p.7: reveal/discard of top-of-deck does nothing if deck is empty
+  // (no auto-refill from trash).
   const ps = state.players[ap];
-  if (ps.deck.length === 0 && ps.trash.length > 0) {
-    ps.deck = ps.trash; ps.trash = [];
-    const rng = { state: state.rngState };
-    const { rngShuffle } = require("./rng");
-    rngShuffle(rng, ps.deck);
-    state.rngState = rng.state;
-  }
   if (ps.deck.length === 0) return;
   const top = ps.deck[ps.deck.length - 1];
   const d = CARD_DEFS[top.defId];
@@ -1703,6 +1698,10 @@ register(START_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
     const c = ps.deck.pop()!;
     c.faceUp = true;
     ps.trash.push(c);
+    // Codex p.7: discarding top of deck counts as a discard — fire
+    // after-discard triggers (Plague 1, War 3, Peace 4, etc.).
+    const { flagAfterDiscard } = require("./helpers");
+    flagAfterDiscard(state, ap);
   }
 });
 
@@ -2174,15 +2173,10 @@ register(MIDDLE_EFFECTS, "MN02:Luck:0", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Luck:1", function* (state, ap) {
+  // Codex p.7: play of top-of-deck does nothing if deck is empty
+  // (no auto-refill from trash).
   const ps = state.players[ap];
-  if (ps.deck.length === 0 && ps.trash.length === 0) return;
-  if (ps.deck.length === 0) {
-    ps.deck = ps.trash; ps.trash = [];
-    const rng = { state: state.rngState };
-    const { rngShuffle } = require("./rng");
-    rngShuffle(rng, ps.deck);
-    state.rngState = rng.state;
-  }
+  if (ps.deck.length === 0) return;
   const lidx: number = yield {
     prompt: "Play top of deck face-down in which line?",
     options: ["0", "1", "2"], targets: [0, 1, 2], optional: false, decider: ap,
@@ -2203,18 +2197,17 @@ register(MIDDLE_EFFECTS, "MN02:Luck:1", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Luck:2", function* (state, ap) {
+  // Codex p.7: discard of top-of-deck does nothing if deck is empty
+  // (no auto-refill from trash).
   const ps = state.players[ap];
-  if (ps.deck.length === 0 && ps.trash.length > 0) {
-    ps.deck = ps.trash; ps.trash = [];
-    const rng = { state: state.rngState };
-    const { rngShuffle } = require("./rng");
-    rngShuffle(rng, ps.deck);
-    state.rngState = rng.state;
-  }
   if (ps.deck.length === 0) return;
   const top = ps.deck.pop()!;
   top.faceUp = true;
   state.players[top.owner].trash.push(top);
+  // Codex p.7: discarding top of deck counts as a discard — fire
+  // after-discard triggers (Plague 1, War 3, Peace 4, etc.).
+  const { flagAfterDiscard } = require("./helpers");
+  flagAfterDiscard(state, ap);
   drawCards(state, ap, CARD_DEFS[top.defId].value);
   if (false) yield {} as Choice;
 });
@@ -2229,13 +2222,8 @@ register(MIDDLE_EFFECTS, "MN02:Luck:3", function* (state, ap, li, card) {
   const stated = allProtos[pi];
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const psOpp = state.players[opp];
-  if (psOpp.deck.length === 0 && psOpp.trash.length > 0) {
-    psOpp.deck = psOpp.trash; psOpp.trash = [];
-    const rng = { state: state.rngState };
-    const { rngShuffle } = require("./rng");
-    rngShuffle(rng, psOpp.deck);
-    state.rngState = rng.state;
-  }
+  // Codex p.7: discard of top-of-deck does nothing if deck is empty
+  // (no auto-refill from trash).
   if (psOpp.deck.length === 0) return;
   const top = psOpp.deck.pop()!;
   top.faceUp = true;
@@ -2254,18 +2242,17 @@ register(MIDDLE_EFFECTS, "MN02:Luck:3", function* (state, ap, li, card) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Luck:4", function* (state, ap, li, card) {
+  // Codex p.7: discard of top-of-deck does nothing if deck is empty
+  // (no auto-refill from trash).
   const ps = state.players[ap];
-  if (ps.deck.length === 0 && ps.trash.length > 0) {
-    ps.deck = ps.trash; ps.trash = [];
-    const rng = { state: state.rngState };
-    const { rngShuffle } = require("./rng");
-    rngShuffle(rng, ps.deck);
-    state.rngState = rng.state;
-  }
   if (ps.deck.length === 0) return;
   const top = ps.deck.pop()!;
   top.faceUp = true;
   state.players[top.owner].trash.push(top);
+  // Codex p.7: discarding top of deck counts as a discard — fire
+  // after-discard triggers (Plague 1, War 3, Peace 4, etc.).
+  const { flagAfterDiscard } = require("./helpers");
+  flagAfterDiscard(state, ap);
   const tv = CARD_DEFS[top.defId].value;
   const targets: FieldTarget[] = [];
   for (let ln = 0; ln < 3; ln++) {
@@ -2636,10 +2623,19 @@ register(MIDDLE_EFFECTS, "MN02:Time:1", function* (state, ap) {
   }
   // Discard entire deck.
   const ps = state.players[ap];
+  let discardedAny = false;
   while (ps.deck.length > 0) {
     const c = ps.deck.pop()!;
     c.faceUp = true;
     state.players[c.owner].trash.push(c);
+    discardedAny = true;
+  }
+  // Codex p.6: "Discard X cards" is a batch — triggers fire ONCE after
+  // the batch (not per card). Codex p.7: discarding top of deck counts
+  // as a discard — fire after-discard triggers.
+  if (discardedAny) {
+    const { flagAfterDiscard } = require("./helpers");
+    flagAfterDiscard(state, ap);
   }
 });
 
@@ -3040,13 +3036,8 @@ register(END_EFFECTS, "AX02:Assimilation:2", function* (state, ap, li, card) {
   if (guardStack.length === 0 || guardStack[guardStack.length - 1] !== card) return;
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   const psOpp = state.players[opp];
-  if (psOpp.deck.length === 0 && psOpp.trash.length > 0) {
-    psOpp.deck = psOpp.trash; psOpp.trash = [];
-    const rng = { state: state.rngState };
-    const { rngShuffle } = require("./rng");
-    rngShuffle(rng, psOpp.deck);
-    state.rngState = rng.state;
-  }
+  // Codex p.7: play of top-of-deck does nothing if deck is empty
+  // (no auto-refill from trash).
   if (psOpp.deck.length === 0) return;
   const c = psOpp.deck.pop()!;
   c.owner = ap;

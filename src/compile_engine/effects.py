@@ -431,15 +431,12 @@ def return_card_to_hand(
 def play_top_deck_face_down(
     state: GameState, player: int, line_idx: int
 ) -> CardInst | None:
+    # Codex p.7 "When do I refill my deck?": "Effects that discard, play, or
+    # reveal the top of the deck do nothing if there are no cards in the
+    # deck." Only `draw_cards` auto-refills from trash.
     ps = state.players[player]
     if not ps.deck:
-        if not ps.trash:
-            return None
-        ps.deck = ps.trash
-        ps.trash = []
-        state.rng.shuffle(ps.deck)
-        if not ps.deck:
-            return None
+        return None
     c = ps.deck.pop()
     c.face_up = False
     state.lines[line_idx].stack(player).append(c)
@@ -450,16 +447,10 @@ def play_top_deck_face_down_under(
     state: GameState, player: int, line_idx: int, under_card: CardInst,
 ) -> CardInst | None:
     """Play top of deck face-down placed *under* `under_card` (insert below).
-    Used by Gravity 0."""
+    Used by Gravity 0. Per Codex p.7, no auto-refill on empty deck."""
     ps = state.players[player]
     if not ps.deck:
-        if not ps.trash:
-            return None
-        ps.deck = ps.trash
-        ps.trash = []
-        state.rng.shuffle(ps.deck)
-        if not ps.deck:
-            return None
+        return None
     stack = state.lines[line_idx].stack(player)
     pos = stack.index(under_card) if under_card in stack else len(stack)
     c = ps.deck.pop()
@@ -2860,11 +2851,9 @@ def _chaos_4_end(state, ap, li, card):
 @start_trigger("MN02:Clarity:1")
 def _clarity_1_top(state, ap, li, card):
     # Reveal top of deck. You may discard the top card of your deck.
+    # Codex p.7: reveal/discard of top-of-deck does nothing if deck is empty
+    # (no auto-refill from trash).
     ps = state.players[ap]
-    if not ps.deck and ps.trash:
-        ps.deck = ps.trash
-        ps.trash = []
-        state.rng.shuffle(ps.deck)
     if not ps.deck:
         return
     top = ps.deck[-1]
@@ -2878,6 +2867,9 @@ def _clarity_1_top(state, ap, li, card):
         c = ps.deck.pop()
         c.face_up = True
         ps.trash.append(c)
+        # Codex p.7: discarding top of deck counts as a discard — fire
+        # after-discard triggers (Plague 1, War 3, Peace 4, etc.).
+        _flag_after_discard(state, ap)
 
 
 @middle("MN02:Clarity:1")
@@ -3482,10 +3474,9 @@ def _luck_0(state, ap, li, card):
 def _luck_1(state, ap, li, card):
     # Play top of deck face-down. Flip it ignoring its middle commands.
     # We implement as: play top deck FU into a line (skipping middle effect).
+    # Codex p.7: play of top-of-deck does nothing if deck is empty
+    # (no auto-refill from trash).
     ps = state.players[ap]
-    if not ps.deck and ps.trash:
-        ps.deck = ps.trash; ps.trash = []
-        state.rng.shuffle(ps.deck)
     if not ps.deck:
         return
     # Pick a line — play face-down then immediately flip face-up without
@@ -3510,15 +3501,17 @@ def _luck_1(state, ap, li, card):
 
 @middle("MN02:Luck:2")
 def _luck_2(state, ap, li, card):
+    # Codex p.7: discard of top-of-deck does nothing if deck is empty
+    # (no auto-refill from trash).
     ps = state.players[ap]
-    if not ps.deck and ps.trash:
-        ps.deck = ps.trash; ps.trash = []
-        state.rng.shuffle(ps.deck)
     if not ps.deck:
         return
     top = ps.deck.pop()
     top.face_up = True
     state.players[top.owner].trash.append(top)
+    # Codex p.7: discarding top of deck counts as a discard — fire
+    # after-discard triggers (Plague 1, War 3, Peace 4, etc.).
+    _flag_after_discard(state, ap)
     val = state.defs[top.def_id].value
     draw_cards(state, ap, val)
     if False:
@@ -3541,9 +3534,8 @@ def _luck_3(state, ap, li, card):
     stated = all_protos[p_idx]
     opp = state.opponent(ap)
     ps_opp = state.players[opp]
-    if not ps_opp.deck and ps_opp.trash:
-        ps_opp.deck = ps_opp.trash; ps_opp.trash = []
-        state.rng.shuffle(ps_opp.deck)
+    # Codex p.7: discard of top-of-deck does nothing if deck is empty
+    # (no auto-refill from trash; only `draw_cards` triggers reshuffle).
     if not ps_opp.deck:
         return
     top = ps_opp.deck.pop()
@@ -3569,15 +3561,17 @@ def _luck_3(state, ap, li, card):
 @middle("MN02:Luck:4")
 def _luck_4(state, ap, li, card):
     # Discard top of deck. Delete 1 covered or uncovered card sharing its value.
+    # Codex p.7: discard of top-of-deck does nothing if deck is empty
+    # (no auto-refill from trash).
     ps = state.players[ap]
-    if not ps.deck and ps.trash:
-        ps.deck = ps.trash; ps.trash = []
-        state.rng.shuffle(ps.deck)
     if not ps.deck:
         return
     top = ps.deck.pop()
     top.face_up = True
     state.players[top.owner].trash.append(top)
+    # Codex p.7: discarding top of deck counts as a discard — fire
+    # after-discard triggers (Plague 1, War 3, Peace 4, etc.).
+    _flag_after_discard(state, ap)
     target_val = state.defs[top.def_id].value
     targets: list[tuple[int, int, int, CardInst]] = []
     for ln in range(NUM_LINES):
@@ -4024,10 +4018,17 @@ def _time_1(state, ap, li, card):
             flip_card(state, t[0], t[1], t[2])
     # Discard entire deck.
     ps = state.players[ap]
+    discarded_any = False
     while ps.deck:
         c = ps.deck.pop()
         c.face_up = True
         state.players[c.owner].trash.append(c)
+        discarded_any = True
+    # Codex p.6: "Discard X cards" is a batch — triggers fire ONCE after
+    # the batch (not per card). Codex p.7: discarding top of deck counts
+    # as a discard — fire after-discard triggers.
+    if discarded_any:
+        _flag_after_discard(state, ap)
 
 
 # Time 2 top (Codex 8/2025 errata): "After you shuffle your deck: Draw 1
@@ -4488,11 +4489,8 @@ def _assim_2_end(state, ap, li, card):
         return
     opp = state.opponent(ap)
     ps_opp = state.players[opp]
-    if not ps_opp.deck:
-        if ps_opp.trash:
-            ps_opp.deck = ps_opp.trash
-            ps_opp.trash = []
-            state.rng.shuffle(ps_opp.deck)
+    # Codex p.7: play of top-of-deck does nothing if deck is empty
+    # (no auto-refill from trash).
     if not ps_opp.deck:
         return
     c = ps_opp.deck.pop()
