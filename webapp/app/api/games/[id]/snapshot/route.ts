@@ -86,32 +86,47 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   let lastAction: Action | null = null;
   let lastEvents: string[] = [];
   let actor: PlayerIndex | null = null;
-  for (let i = 0; i < target; i++) {
-    if (game.isOver()) break;
-    const a = actions[i];
-    // Heal older action histories: dismisses display-only reveal pauses
-    // and abandons newly-firing post-fix triggers that the saved action
-    // list doesn't account for. See lib/replay.ts.
-    autoResolveCompatChoices(game, a);
-    // Inverse compat: skip now-stale CHOOSE_TARGETs when the engine has
-    // no pending Choice (a later engine fix removed the trigger).
-    if (
-      a.type === "CHOOSE_TARGET" &&
-      (game as unknown as { pending: unknown[] }).pending.length === 0
-    ) {
-      continue;
+  try {
+    for (let i = 0; i < target; i++) {
+      if (game.isOver()) break;
+      const a = actions[i];
+      // Heal older action histories: dismisses display-only reveal pauses
+      // and abandons newly-firing post-fix triggers that the saved action
+      // list doesn't account for. See lib/replay.ts.
+      autoResolveCompatChoices(game, a);
+      // Inverse compat: skip now-stale CHOOSE_TARGETs when the engine has
+      // no pending Choice (a later engine fix removed the trigger).
+      if (
+        a.type === "CHOOSE_TARGET" &&
+        (game as unknown as { pending: unknown[] }).pending.length === 0
+      ) {
+        continue;
+      }
+      const last = i === target - 1;
+      if (last) {
+        lastLabel = labelAction(game, a, viewer);
+        actor = game.decider();
+      }
+      const preLogLen = game.state.log.length;
+      game.step(a);
+      if (last) {
+        lastAction = a;
+        lastEvents = infoSlice(game.state.log, preLogLen, game.state.log.length);
+      }
     }
-    const last = i === target - 1;
-    if (last) {
-      lastLabel = labelAction(game, a, viewer);
-      actor = game.decider();
-    }
-    const preLogLen = game.state.log.length;
-    game.step(a);
-    if (last) {
-      lastAction = a;
-      lastEvents = infoSlice(game.state.log, preLogLen, game.state.log.length);
-    }
+  } catch (err) {
+    // Replay-compat: engine evolved since this game was saved and can't
+    // reconstruct this snapshot. Surface a structured error so the
+    // page route's analysis panel can show a warning instead of 500ing.
+    return NextResponse.json(
+      {
+        error: "replay_unavailable",
+        message: err instanceof Error ? err.message : String(err),
+        index: target,
+        totalActions,
+      },
+      { status: 422 },
+    );
   }
 
   return NextResponse.json({

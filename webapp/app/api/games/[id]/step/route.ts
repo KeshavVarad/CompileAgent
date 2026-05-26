@@ -47,7 +47,21 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!row) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (row.userId !== session.userId) return NextResponse.json({ error: "forbidden" }, { status: 403 });
 
-  const game = gameFromRow(row);
+  let game;
+  try {
+    game = gameFromRow(row);
+  } catch (err) {
+    // Replay-compat: engine evolved since this game was saved. The user
+    // should not be able to keep playing this game — surface a 422 so
+    // the client can prompt them to start a new game.
+    return NextResponse.json(
+      {
+        error: "replay_unavailable",
+        message: err instanceof Error ? err.message : String(err),
+      },
+      { status: 422 },
+    );
+  }
   if (game.isOver()) return NextResponse.json({ error: "game already over" }, { status: 400 });
 
   // Information-set viewer for label redaction — the seat the human
