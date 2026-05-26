@@ -1173,6 +1173,16 @@ register(MIDDLE_EFFECTS, "MN01:Psychic:0", function* (state, ap) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   drawCards(state, ap, 2);
   yield* discardN(state, opp, 2);
+  // Card text: "...then reveals their hand." Match the Python engine's
+  // behaviour (see _psychic_0 in src/compile_engine/effects.py): the
+  // reveal is surfaced as a log entry listing opp's hand contents, so
+  // it shows up in the history panel. (The hand isn't rendered face-up
+  // visually — the engine's view layer doesn't have a reveal-state
+  // concept yet. Same pattern as Light 4 and Clarity 1.)
+  const hand = state.players[opp].hand
+    .map((c) => `${CARD_DEFS[c.defId].protocol} ${CARD_DEFS[c.defId].value}`)
+    .join(", ");
+  logInfo(state, `P${opp + 1} hand revealed: ${hand || "<empty>"}`);
 });
 
 register(MIDDLE_EFFECTS, "MN01:Psychic:2", function* (state, ap) {
