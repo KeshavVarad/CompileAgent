@@ -893,9 +893,15 @@ function LineCard({
           the visual midline regardless of how many cards either player
           has. The opp half anchors content to the top (justify-start)
           so opp's stack hangs from the header; the me half anchors to
-          the bottom (justify-end) so my stack rises off my footer. */}
-      <div className="flex-1 flex flex-col items-stretch min-h-0">
-        <div className="flex-1 flex flex-col items-stretch min-h-0 overflow-hidden">
+          the bottom (justify-end) so my stack rises off my footer.
+          The halves do NOT have overflow:hidden or min-h-0 — both
+          would clip stacks past 2-3 cards. Instead each half grows
+          to fit its own content height; the parent grid auto-equalises
+          all three lanes to the tallest, so a deep stack in one line
+          gracefully resizes the whole row. min-h-[480px] on the
+          LineCard above is the floor for empty/light boards. */}
+      <div className="flex-1 flex flex-col items-stretch">
+        <div className="flex-1 flex flex-col items-stretch">
           <Stack
             stack={oppStack}
             owner="opp"
@@ -906,7 +912,7 @@ function LineCard({
           />
         </div>
         <div className="h-px bg-border shrink-0" />
-        <div className="flex-1 flex flex-col items-stretch justify-end min-h-0 overflow-hidden">
+        <div className="flex-1 flex flex-col items-stretch justify-end">
           <Stack
             stack={myStack}
             owner="me"
