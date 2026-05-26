@@ -29,6 +29,7 @@ import {
   oppPlayFacedownBlockedInLine,
   playerMayPlayAnyLineFaceup,
   playTopDeckFaceDown,
+  playTopDeckFaceDownUnder,
   refreshPlayer,
   returnCardToHand,
   shiftCard,
@@ -810,9 +811,13 @@ register(MIDDLE_EFFECTS, "MN01:Fire:4", function* (state, ap) {
 // ---------------------------------------------------------------------------
 
 register(MIDDLE_EFFECTS, "MN01:Gravity:0", function* (state, ap, li, card) {
+  // "For every 2 cards in this line, play the top card of your deck
+  // face-down under this card." The "under this card" wording is
+  // non-standard — Gravity 0 stays uncovered on top while face-down 2s
+  // slip below it. Mirrors the Python `play_top_deck_face_down_under`.
   const total = state.lines[li].p0Stack.length + state.lines[li].p1Stack.length;
   const n = Math.floor(total / 2);
-  for (let k = 0; k < n; k++) playTopDeckFaceDown(state, ap, li);
+  for (let k = 0; k < n; k++) playTopDeckFaceDownUnder(state, ap, li, card);
   if (false) yield {} as Choice;
 });
 

@@ -405,6 +405,28 @@ export function playTopDeckFaceDown(
   return c;
 }
 
+/** Play top of deck face-down inserted *below* `underCard` in the same
+ *  line — used by Gravity 0 ("play face-down under this card"). The card
+ *  text explicitly directs the new card below the source, so Gravity 0
+ *  stays uncovered on top while face-down 2s pile up beneath it. Per
+ *  Codex p.7, no auto-refill on empty deck. */
+export function playTopDeckFaceDownUnder(
+  state: GameState,
+  player: PlayerIndex,
+  lineIdx: number,
+  underCard: CardInst,
+): CardInst | null {
+  const ps = state.players[player];
+  if (ps.deck.length === 0) return null;
+  const stack = lineStack(state.lines[lineIdx], player);
+  const pos = stack.indexOf(underCard);
+  const insertAt = pos >= 0 ? pos : stack.length;
+  const c = ps.deck.pop()!;
+  c.faceUp = false;
+  stack.splice(insertAt, 0, c);
+  return c;
+}
+
 /** Generator. A "refresh" — replenishes hand to 5 and flags the
  *  after-refresh event. Codex p.10 (Spirit 0 clarification): when you
  *  refresh as instructed it is a "normal refresh action, including
