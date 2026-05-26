@@ -4,10 +4,32 @@
  */
 
 import { RandomBot } from "./compile/bot";
+import { REVEAL_HAND_PROMPT } from "./compile/effects";
 import { Game } from "./compile/game";
 import { NNBot, isNNStrategy } from "./compile/nn-bot";
 import type { Action } from "./compile/types";
 import type { Game as DbGame } from "./db/schema";
+
+/** Backwards-compat shim. When the engine adds a new pending Choice that
+ *  pre-existing action histories don't have a CHOOSE_TARGET for, replay
+ *  would throw "expected CHOOSE_TARGET". Currently the only such Choice
+ *  is the human-only hand-reveal pause (REVEAL_HAND_PROMPT) added when
+ *  Psychic 0 / Light 4 / Clarity 1 was played. Auto-resolve those
+ *  Choices during replay of older games so they keep loading. New
+ *  games will record the CHOOSE_TARGET themselves and won't hit this
+ *  branch. */
+function autoResolveCompatChoices(g: Game): void {
+  // `pending` is private on Game; bracket-access matches how
+  // view.ts already inspects the pending stack from outside the class.
+  while (true) {
+    const stack = (g as unknown as { pending: { lastChoice: { prompt: string } | null }[] }).pending;
+    const top = stack[stack.length - 1];
+    const choice = top?.lastChoice;
+    if (!choice) return;
+    if (choice.prompt !== REVEAL_HAND_PROMPT) return;
+    g.step({ type: "CHOOSE_TARGET", choiceIndex: 0 });
+  }
+}
 
 export function gameFromRow(row: DbGame): Game {
   const g = new Game({
@@ -26,6 +48,9 @@ export function gameFromRow(row: DbGame): Game {
   g.start();
   for (const a of (row.actions as Action[])) {
     if (g.isOver()) break;
+    // Heal older action histories before applying the next saved step.
+    // See autoResolveCompatChoices for the motivation.
+    autoResolveCompatChoices(g);
     g.step(a);
   }
   return g;
