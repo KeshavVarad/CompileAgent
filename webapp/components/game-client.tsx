@@ -16,6 +16,7 @@ import { BugReportDialog } from "@/components/bug-report-dialog";
 import { DeleteGameButton } from "@/components/delete-game-button";
 import { EvalDialog } from "@/components/eval-dialog";
 import { defsForProtocol, type Protocol } from "@/lib/compile/cards";
+import { REVEAL_HAND_PROMPT } from "@/lib/compile/effects";
 import type { Action } from "@/lib/compile/types";
 import type { ActionView, CardView, GameView, LineView } from "@/lib/view";
 
@@ -422,13 +423,22 @@ export function GameClient({ gameId, initialView, initialTotalActions }: Props) 
       ) : (
         <>
           <PlayerStrip view={view} side={oppSeat} isMe={false} />
-          {mode === "record" && (
+          {/* Render opp's hand row in two cases:
+             - record mode (existing behavior — placeholders to log opp's actions)
+             - play mode during an active hand-reveal Choice from a card like
+               Psychic 0, Light 4, or Clarity 1. The engine pauses with a
+               "Continue" Choice; the user sees opp's hand face-up here
+               until they click Continue in the ChoiceDialog below. */}
+          {(mode === "record" ||
+            (view.pendingChoice?.prompt === REVEAL_HAND_PROMPT
+             && view.pendingChoice.decider === me)) && (
             <OppHandRow
               view={view}
               oppSeat={oppSeat}
               selection={selection}
               oppHandIndicesWithActions={oppHandIndicesWithActions}
               onSelect={(s) => setSelection(s)}
+              revealMode={mode === "play"}
             />
           )}
           <Board
@@ -1098,12 +1108,21 @@ function OppHandRow({
   selection,
   oppHandIndicesWithActions,
   onSelect,
+  revealMode = false,
 }: {
   view: GameView;
   oppSeat: 0 | 1;
   selection: Selection | null;
   oppHandIndicesWithActions: Set<number>;
   onSelect: (s: Selection | null) => void;
+  /** True when this row is being shown to surface a card-effect-driven
+   *  hand reveal (Psychic 0 / Light 4 / Clarity 1) during a play-mode
+   *  game. In this mode cards are non-interactive (you can't act on
+   *  opp's hand cards) and the label/styling shifts to communicate
+   *  the temporary reveal. Default false preserves the record-mode
+   *  behaviour where cards are placeholders the recorder clicks to
+   *  log opp moves. */
+  revealMode?: boolean;
 }) {
   const hand = view.players[oppSeat].hand;
   const oppLabel = oppSeat === 0 ? view.config.player0Label : view.config.player1Label;
@@ -1113,23 +1132,31 @@ function OppHandRow({
     <div className="mt-2 rounded-lg border border-dashed border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
       <div className="mb-2 flex items-baseline justify-between">
         <span className="text-[10px] font-mono uppercase tracking-wide text-amber-200/80">
-          {oppLabel}&apos;s hand · placeholders
+          {oppLabel}&apos;s hand · {revealMode ? "revealed" : "placeholders"}
         </span>
-        {oppHandIndicesWithActions.size > 0 && (
+        {revealMode ? (
           <span className="text-[10px] font-mono text-muted-foreground">
-            click a card to log their move
+            click Continue below when done viewing
           </span>
+        ) : (
+          oppHandIndicesWithActions.size > 0 && (
+            <span className="text-[10px] font-mono text-muted-foreground">
+              click a card to log their move
+            </span>
+          )
         )}
       </div>
       <div className="flex flex-wrap gap-2">
         {hand.map((c, i) => {
-          const interactive = oppHandIndicesWithActions.has(i);
+          // In reveal mode opp cards are read-only — non-interactive,
+          // visible identities (defId is the real card, not -1).
+          const interactive = !revealMode && oppHandIndicesWithActions.has(i);
           return (
             <PlayCard
               key={c.instId}
               card={c}
               variant="board"
-              hidden={c.defId === -1}
+              hidden={!revealMode && c.defId === -1}
               selected={selectedHi === i}
               onClick={interactive ? () => onSelect({ kind: "opp-hand", handIndex: i }) : undefined}
               disabled={!interactive}

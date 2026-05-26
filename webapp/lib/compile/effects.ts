@@ -194,6 +194,44 @@ function register(reg: Record<string, EffectFn>, key: string, fn: EffectFn): voi
   reg[key] = fn;
 }
 
+/**
+ * Reveal the opponent's hand to the active player. Always logs the
+ * contents to the history panel; when a human player triggered the
+ * reveal, also yields a single-option "Continue" Choice so the UI can
+ * pause and render the opp hand visually until the user dismisses it.
+ *
+ * Used by Psychic 0, Light 4, and Clarity 1 (all three cards whose
+ * text says "reveals their hand"). The Choice is gated on
+ * config.human[ap] so bot-vs-bot training (Python engine) never sees
+ * the extra prompt, and bot-vs-human inference doesn't waste a
+ * CHOOSE_TARGET decision when the bot is the one triggering the reveal.
+ *
+ * The UI side (game-client.tsx) detects this Choice by its prompt
+ * prefix and renders OppHandRow during the pause.
+ */
+function* revealOppHand(state: GameState, ap: PlayerIndex): EffectGen {
+  const opp: PlayerIndex = ap === 0 ? 1 : 0;
+  const hand = state.players[opp].hand
+    .map((c) => `${CARD_DEFS[c.defId].protocol} ${CARD_DEFS[c.defId].value}`)
+    .join(", ");
+  logInfo(state, `P${opp + 1} hand revealed: ${hand || "<empty>"}`);
+  if (state.config.human?.[ap]) {
+    yield {
+      prompt: REVEAL_HAND_PROMPT,
+      options: ["Continue"],
+      targets: [0],
+      optional: false,
+      decider: ap,
+    };
+  }
+}
+
+/** Stable string the UI matches on to detect a hand-reveal Choice.
+ *  Exported so the client code can import it instead of duplicating
+ *  the string. */
+export const REVEAL_HAND_PROMPT =
+  "Opponent's hand revealed — click Continue when done viewing";
+
 // ---------------------------------------------------------------------------
 // Value-5 "You discard 1 card." across all 15 protocols.
 // ---------------------------------------------------------------------------
@@ -970,14 +1008,9 @@ register(MIDDLE_EFFECTS, "MN01:Light:2", function* (state, ap) {
   }
 });
 
-// Light 4 middle: opponent reveals their hand (informational).
+// Light 4 middle: opponent reveals their hand.
 register(MIDDLE_EFFECTS, "MN01:Light:4", function* (state, ap) {
-  const opp: PlayerIndex = ap === 0 ? 1 : 0;
-  const hand = state.players[opp].hand
-    .map((c) => `${CARD_DEFS[c.defId].protocol} ${CARD_DEFS[c.defId].value}`)
-    .join(", ");
-  logInfo(state, `P${opp + 1} hand revealed: ${hand || "<empty>"}`);
-  if (false) yield {} as Choice;
+  yield* revealOppHand(state, ap);
 });
 
 register(MIDDLE_EFFECTS, "MN01:Light:3", function* (state, ap, li) {
@@ -1173,16 +1206,8 @@ register(MIDDLE_EFFECTS, "MN01:Psychic:0", function* (state, ap) {
   const opp: PlayerIndex = ap === 0 ? 1 : 0;
   drawCards(state, ap, 2);
   yield* discardN(state, opp, 2);
-  // Card text: "...then reveals their hand." Match the Python engine's
-  // behaviour (see _psychic_0 in src/compile_engine/effects.py): the
-  // reveal is surfaced as a log entry listing opp's hand contents, so
-  // it shows up in the history panel. (The hand isn't rendered face-up
-  // visually — the engine's view layer doesn't have a reveal-state
-  // concept yet. Same pattern as Light 4 and Clarity 1.)
-  const hand = state.players[opp].hand
-    .map((c) => `${CARD_DEFS[c.defId].protocol} ${CARD_DEFS[c.defId].value}`)
-    .join(", ");
-  logInfo(state, `P${opp + 1} hand revealed: ${hand || "<empty>"}`);
+  // Card text: "...then reveals their hand."
+  yield* revealOppHand(state, ap);
 });
 
 register(MIDDLE_EFFECTS, "MN01:Psychic:2", function* (state, ap) {
@@ -1682,12 +1707,7 @@ register(START_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
 });
 
 register(MIDDLE_EFFECTS, "MN02:Clarity:1", function* (state, ap) {
-  const opp: PlayerIndex = ap === 0 ? 1 : 0;
-  const hand = state.players[opp].hand
-    .map((c) => `${CARD_DEFS[c.defId].protocol} ${CARD_DEFS[c.defId].value}`)
-    .join(", ");
-  (state.scratch["_reveals"] ??= [] as string[]); (state.scratch["_reveals"] as string[]).push(`P${opp} reveals hand: ${hand || "<empty>"}`);
-  if (false) yield {} as Choice;
+  yield* revealOppHand(state, ap);
 });
 
 // Clarity 1 bottom — "When this card would be covered: First, draw 3 cards."
