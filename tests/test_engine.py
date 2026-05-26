@@ -2686,3 +2686,70 @@ def test_middle_fires_on_flip_face_up():
     assert len(g.state.players[0].hand) <= 3, (
         f"P0 (target of Plague 2 flip) should have discarded ≥2 cards; hand={len(g.state.players[0].hand)}"
     )
+
+
+def test_middle_fires_on_flip_then_shift_same_chain():
+    """If a card is flipped face-up AND shifted to a different line in
+    the same effect chain (Darkness 1's 'Flip 1 of your opponent's
+    cards. You may shift that card.'), the post-flip middle command
+    must still fire. The face_up trigger is queued against the card's
+    ORIGINAL line; the engine must re-locate the card by identity on
+    the owner's side when the trigger fires.
+
+    Regression test for a user-observed bug: opp's Plague 2 face-down
+    on L1 was flipped via Darkness 1 then shifted to a different line.
+    Plague 2's middle never fired, no discards happened. Pre-fix the
+    `if card not in stack` guard skipped the trigger entirely."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    from compile_engine.effects import flip_card, shift_card
+    g = Game(GameConfig(seed=901))
+    g.set_predetermined_draft([["Plague", "Speed", "Fire"], ["Light", "Darkness", "Water"]])
+    g.start()
+    defs = load_card_defs()
+    plague_2 = next(d for d in defs if d.key == "MN01:Plague:2")
+    spirit_0 = next(d for d in defs if d.key == "MN01:Spirit:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    p2 = CardInst(inst_id=901_01, def_id=plague_2.def_id, owner=1, face_up=False)
+    g.state.lines[0].p1_stack.append(p2)
+    g.state.players[0].hand = [
+        CardInst(inst_id=901_10 + i, def_id=spirit_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].hand = [
+        CardInst(inst_id=901_20 + i, def_id=spirit_0.def_id, owner=1, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+
+    # Flip + shift in the same engine tick (simulates Darkness 1's
+    # middle running its full body before the trigger queue drains).
+    flip_card(g.state, 0, 1, 0)
+    shift_card(g.state, 0, 1, 0, 2)
+    # Plague 2 is now face-up on L3, not L1 where the trigger was queued.
+
+    greedy = GreedyAgent(seed=1)
+    for _ in range(50):
+        g._drive()
+        if g._pending and g._pending[-1].last_choice is not None:
+            legal = g.legal_actions()
+            if not legal:
+                break
+            g.step(greedy.choose(g, legal))
+        else:
+            break
+
+    assert p2 in g.state.lines[2].p1_stack, "Plague 2 should be on L3 after shift"
+    assert p2.face_up
+    # Middle MUST have fired: P1 lost ≥1 card, P0 lost ≥2.
+    assert len(g.state.players[1].hand) <= 4, (
+        f"Plague 2 middle didn't fire after flip+shift: P1 hand still {len(g.state.players[1].hand)}"
+    )
+    assert len(g.state.players[0].hand) <= 3, (
+        f"Plague 2 middle didn't fire after flip+shift: P0 hand still {len(g.state.players[0].hand)}"
+    )
