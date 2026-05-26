@@ -46,7 +46,7 @@ export function autoResolveCompatChoices(g: Game, nextAction?: Action): void {
       nextAction.type !== "CHOOSE_TARGET" &&
       nextAction.type !== "SKIP_OPTIONAL"
     ) {
-      (g as unknown as { abandonPendingChoice: () => void }).abandonPendingChoice();
+      (g as unknown as { skipPendingChoice: () => void }).skipPendingChoice();
       continue;
     }
     return;
