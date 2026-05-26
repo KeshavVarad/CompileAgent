@@ -469,7 +469,19 @@ export class Game {
   private enqueueFaceUpTriggers(c: CardInst, ap: PlayerIndex, lineIdx: number): void {
     // Push in reverse-resolution order so LIFO drain runs top -> bottom_first -> middle.
     const d = CARD_DEFS[c.defId];
-    const midFn: EffectFn | null = middleSuppressed(this.state, lineIdx, c) ? null : getMiddleEffect(c.defId);
+    // Codex p.9: "Does a card's middle command happen if it's flipped
+    // face-up while covered? No. Because the card is always considered
+    // to be covered, its middle text never comes into play." Suppress
+    // middle when the card is not the top of its stack — affects
+    // Chaos 0 (flips covered cards) and any future "flip covered"
+    // effects. Top/bottom enter-play triggers still fire (top text is
+    // in play as long as the card is face-up, per Codex p.7).
+    const stack = lineStack(this.state.lines[lineIdx], ap);
+    const isCovered = stack.length === 0 || stack[stack.length - 1] !== c;
+    const midFn: EffectFn | null =
+      isCovered || middleSuppressed(this.state, lineIdx, c)
+        ? null
+        : getMiddleEffect(c.defId);
     if (midFn && d.middleText) this.pushEffect(midFn(this.state, ap, lineIdx, c), c);
     const bf = getBottomFirstEffect(c.defId);
     if (bf) this.pushEffect(bf(this.state, ap, lineIdx, c), c);

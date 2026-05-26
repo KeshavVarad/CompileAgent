@@ -394,14 +394,11 @@ export function playTopDeckFaceDown(
   player: PlayerIndex,
   lineIdx: number,
 ): CardInst | null {
+  // Codex p.7 "When do I refill my deck?": "Effects that discard, play, or
+  // reveal the top of the deck do nothing if there are no cards in the
+  // deck." Only `drawCards` auto-refills from trash.
   const ps = state.players[player];
-  if (ps.deck.length === 0) {
-    if (ps.trash.length === 0) return null;
-    ps.deck = ps.trash;
-    ps.trash = [];
-    rngShuffle({ state: state.rngState }, ps.deck);
-    if (ps.deck.length === 0) return null;
-  }
+  if (ps.deck.length === 0) return null;
   const c = ps.deck.pop()!;
   c.faceUp = false;
   lineStack(state.lines[lineIdx], player).push(c);

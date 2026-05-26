@@ -2753,3 +2753,147 @@ def test_middle_fires_on_flip_then_shift_same_chain():
     assert len(g.state.players[0].hand) <= 3, (
         f"Plague 2 middle didn't fire after flip+shift: P0 hand still {len(g.state.players[0].hand)}"
     )
+
+
+def test_play_top_deck_face_down_no_refill_on_empty_deck():
+    """Codex p.7 'When do I refill my deck?': 'Effects that discard, play,
+    or reveal the top of the deck do nothing if there are no cards in the
+    deck.' Only the standard draw auto-refills. Verify
+    play_top_deck_face_down returns None and leaves trash untouched when
+    the deck is empty."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import play_top_deck_face_down
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=42))
+    g.set_predetermined_draft([
+        ["Speed", "Light", "Plague"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.players[0].deck = []
+    g.state.players[0].trash = [
+        CardInst(inst_id=30001 + i, def_id=light_1.def_id, owner=0, face_up=True)
+        for i in range(3)
+    ]
+    pre_trash_ids = [c.inst_id for c in g.state.players[0].trash]
+    pre_line_len = len(g.state.lines[0].p0_stack)
+    result = play_top_deck_face_down(g.state, 0, 0)
+    assert result is None, "play of top-of-deck on empty deck should return None"
+    assert g.state.players[0].deck == [], "trash must NOT be shuffled into deck"
+    assert [c.inst_id for c in g.state.players[0].trash] == pre_trash_ids, (
+        "trash must be untouched on empty-deck play"
+    )
+    assert len(g.state.lines[0].p0_stack) == pre_line_len, "no card was played"
+
+
+def test_after_discard_fires_when_discarding_top_of_deck():
+    """Codex p.7 FAQ: 'If an effect happens when someone discards cards,
+    that includes both discarding from hand and discarding from the top of
+    a deck.' Verify Plague 1 (top: 'After your opponent discards cards:
+    Draw 1 card.') fires when Luck 2 middle discards P1's top-of-deck."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import MIDDLE_EFFECTS
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=42, include_expansion=True, include_main2=True))
+    g.set_predetermined_draft([
+        ["Plague", "Light", "Fire"],
+        ["Luck", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    plague_1 = next(d for d in defs if d.key == "MN01:Plague:1")
+    luck_2 = next(d for d in defs if d.key == "MN02:Luck:2")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P0 has Plague 1 face-up on field (line 0).
+    p1_inst = CardInst(inst_id=40001, def_id=plague_1.def_id, owner=0, face_up=True)
+    g.state.lines[0].p0_stack = [p1_inst]
+    # P1 has a Luck 2 face-up on field (line 1) — its middle will be invoked
+    # directly to discard P1's top-of-deck.
+    l2_inst = CardInst(inst_id=40002, def_id=luck_2.def_id, owner=1, face_up=True)
+    g.state.lines[1].p1_stack = [l2_inst]
+    # Hands and decks.
+    g.state.players[0].hand = []
+    g.state.players[0].deck = [
+        CardInst(inst_id=40100 + i, def_id=light_1.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].hand = []
+    g.state.players[1].deck = [
+        CardInst(inst_id=40200 + i, def_id=light_1.def_id, owner=1, face_up=False)
+        for i in range(5)
+    ]
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 1
+    pre_p0_hand = len(g.state.players[0].hand)
+    pre_p1_trash = len(g.state.players[1].trash)
+    # Fire Luck 2's middle directly. Luck 2: "Discard the top card of
+    # your deck. Draw cards equal to the value of the discarded card."
+    g._push_effect(MIDDLE_EFFECTS["MN02:Luck:2"](g.state, 1, 1, l2_inst))
+    g._drive()
+    # P1's trash must have grown by exactly 1 (the discarded top-of-deck card;
+    # the subsequent draw goes to hand, not trash).
+    assert len(g.state.players[1].trash) == pre_p1_trash + 1, (
+        f"P1 top-of-deck discard did not happen: trash {pre_p1_trash} → "
+        f"{len(g.state.players[1].trash)}"
+    )
+    # P0's Plague 1 must have fired → P0 drew 1 card.
+    assert len(g.state.players[0].hand) == pre_p0_hand + 1, (
+        f"Plague 1 should fire after opp discards top-of-deck; "
+        f"P0 hand: {pre_p0_hand} → {len(g.state.players[0].hand)}"
+    )
+
+
+def test_covered_card_flipped_face_up_does_not_fire_middle():
+    """Codex p.9 FAQ: 'Does a card's middle command happen if it's flipped
+    face-up while covered? No. Because the card is always considered to be
+    covered, its middle text never comes into play.' Codex p.13 (Chaos 0
+    clarification): 'Covered cards never activate their middle command
+    when flipped.'
+
+    Setup: Plague 3 face-down at pos 0 covered by a face-down filler, plus
+    a face-up Light 1 on a different line. Flip the covered Plague 3
+    face-up via flip_card. If middle fires (BUG) Plague 3 would flip every
+    other uncovered face-up card → the witness Light 1 would go face-down.
+    If middle is correctly suppressed, the witness stays face-up."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.effects import flip_card
+    from compile_engine.state import CardInst
+    g = Game(GameConfig(seed=42))
+    g.set_predetermined_draft([
+        ["Plague", "Light", "Fire"],
+        ["Darkness", "Death", "Water"],
+    ])
+    defs = load_card_defs()
+    plague_3 = next(d for d in defs if d.key == "MN01:Plague:3")
+    light_1 = next(d for d in defs if d.key == "MN01:Light:1")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # Line 0 P0: Plague 3 face-down at pos 0, covered by face-DOWN Light 1
+    # (face-down covering card so the cover itself is not a face-up
+    # target of Plague 3's hypothetical middle).
+    p3 = CardInst(inst_id=50001, def_id=plague_3.def_id, owner=0, face_up=False)
+    cover = CardInst(inst_id=50002, def_id=light_1.def_id, owner=0, face_up=False)
+    g.state.lines[0].p0_stack = [p3, cover]
+    # Line 1 P0: a face-up Light 1, uncovered. Witness for whether Plague 3
+    # middle fired.
+    witness = CardInst(inst_id=50003, def_id=light_1.def_id, owner=0, face_up=True)
+    g.state.lines[1].p0_stack = [witness]
+    g.state.scratch["_engine"] = g
+    g._pending = []
+    g.state.current_player = 0
+    flip_card(g.state, 0, 0, 0)  # flip Plague 3 face-up while covered
+    g._drive()
+    # Plague 3 is now face-up but still covered.
+    assert p3.face_up
+    assert g.state.lines[0].p0_stack[-1] is cover, (
+        "Plague 3 should still be covered after the flip"
+    )
+    # Witness stays face-up — Plague 3 middle must NOT have fired.
+    assert witness.face_up, (
+        "Plague 3 middle fired while it was covered (Codex p.9/p.13 says it "
+        "must not); witness on line 1 was flipped face-down"
+    )

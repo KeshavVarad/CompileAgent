@@ -841,7 +841,16 @@ class Game:
         d = st.defs[card.def_id]
         # Resolution order desired: top_trigger -> bottom_first -> middle.
         # Push in reverse so the stack drains in the desired order.
-        mid_fn = None if middle_suppressed(st, line_idx, card) else get_middle_effect(d)
+        # Codex p.9: "Does a card's middle command happen if it's flipped
+        # face-up while covered? No. Because the card is always considered
+        # to be covered, its middle text never comes into play." Suppress
+        # middle when the card is not the top of its stack — affects
+        # Chaos 0 (flips covered cards) and any future "flip covered"
+        # effects. Top/bottom enter-play triggers still fire (top text is
+        # in play as long as the card is face-up, per Codex p.7).
+        stack = st.lines[line_idx].stack(ap)
+        is_covered = not stack or stack[-1] is not card
+        mid_fn = None if (is_covered or middle_suppressed(st, line_idx, card)) else get_middle_effect(d)
         if mid_fn is not None and d.middle_text:
             self._push_effect(mid_fn(st, ap, line_idx, card))
         # Bottom: "First, ..." resolves before middle. Also handle bottom-on-play
