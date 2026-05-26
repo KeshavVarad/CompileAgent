@@ -88,10 +88,19 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   let actor: PlayerIndex | null = null;
   for (let i = 0; i < target; i++) {
     if (game.isOver()) break;
-    // Heal older action histories that don't include the CHOOSE_TARGET
-    // for the new reveal-pause Choice. See lib/replay.ts.
-    autoResolveCompatChoices(game);
     const a = actions[i];
+    // Heal older action histories: dismisses display-only reveal pauses
+    // and abandons newly-firing post-fix triggers that the saved action
+    // list doesn't account for. See lib/replay.ts.
+    autoResolveCompatChoices(game, a);
+    // Inverse compat: skip now-stale CHOOSE_TARGETs when the engine has
+    // no pending Choice (a later engine fix removed the trigger).
+    if (
+      a.type === "CHOOSE_TARGET" &&
+      (game as unknown as { pending: unknown[] }).pending.length === 0
+    ) {
+      continue;
+    }
     const last = i === target - 1;
     if (last) {
       lastLabel = labelAction(game, a, viewer);

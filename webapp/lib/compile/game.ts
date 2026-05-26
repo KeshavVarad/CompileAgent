@@ -991,6 +991,19 @@ export class Game {
     return false;
   }
 
+  /** Abandon the topmost pending effect generator without resuming it.
+   *  Used by the replay-compat shim when an older saved game's action
+   *  history doesn't account for a trigger that a later engine fix made
+   *  newly fire (e.g. PR #59 made Darkness 1's flip-then-shift fire the
+   *  post-shift middle, which older saves don't have a CHOOSE_TARGET for).
+   *  Side effects the generator already applied before the yield stay;
+   *  anything after the yield never runs — matching the older engine. */
+  abandonPendingChoice(): void {
+    if (this.pending.length === 0) return;
+    this.pending.pop();
+    this.drive();
+  }
+
   private resolveChoice(a: Action): void {
     const top = this.pending[this.pending.length - 1];
     const choice = top.lastChoice;

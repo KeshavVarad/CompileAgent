@@ -10,18 +10,26 @@ import { NNBot, isNNStrategy } from "./compile/nn-bot";
 import type { Action } from "./compile/types";
 import type { Game as DbGame } from "./db/schema";
 
-/** Backwards-compat shim. When the engine adds a new pending Choice that
- *  pre-existing action histories don't have a CHOOSE_TARGET for, replay
- *  would throw "expected CHOOSE_TARGET". Currently the only such Choice
- *  is the human-only hand-reveal pause (REVEAL_HAND_PROMPT) added when
- *  Psychic 0 / Light 4 / Clarity 1 was played. Auto-resolve those
- *  Choices during replay of older games so they keep loading. New
- *  games will record the CHOOSE_TARGET themselves and won't hit this
- *  branch.
+/** Backwards-compat shim. When the engine evolves to surface a pending
+ *  Choice that pre-existing action histories don't account for, raw
+ *  replay would throw "expected CHOOSE_TARGET". Two flavors handled:
+ *
+ *  1. Known-skippable display-only Choices (REVEAL_HAND_PROMPT, added by
+ *     PR #56 for Psychic 0 / Light 4 / Clarity 1) — auto-resolve with
+ *     index 0; just dismisses the human-only pause card.
+ *  2. New triggers that older engines silently failed to fire (e.g.
+ *     PR #59 made Darkness 1's flip-then-shift fire the post-shift
+ *     middle, which older saves don't record a CHOOSE_TARGET for). When
+ *     the next saved action isn't a CHOOSE_TARGET/SKIP_OPTIONAL but the
+ *     engine is waiting on one, abandon the pending generator — this
+ *     matches the older engine where the trigger never fired.
+ *
+ *  Pass `nextAction` so case 2 can compare against what the saved
+ *  history actually has queued. Without it the shim only handles case 1.
  *
  *  Exported so the snapshot route (which has its own replay loop) and
  *  any future replayer can reuse it instead of duplicating the logic. */
-export function autoResolveCompatChoices(g: Game): void {
+export function autoResolveCompatChoices(g: Game, nextAction?: Action): void {
   // `pending` is private on Game; bracket-access matches how
   // view.ts already inspects the pending stack from outside the class.
   while (true) {
@@ -29,8 +37,19 @@ export function autoResolveCompatChoices(g: Game): void {
     const top = stack[stack.length - 1];
     const choice = top?.lastChoice;
     if (!choice) return;
-    if (choice.prompt !== REVEAL_HAND_PROMPT) return;
-    g.step({ type: "CHOOSE_TARGET", choiceIndex: 0 });
+    if (choice.prompt === REVEAL_HAND_PROMPT) {
+      g.step({ type: "CHOOSE_TARGET", choiceIndex: 0 });
+      continue;
+    }
+    if (
+      nextAction &&
+      nextAction.type !== "CHOOSE_TARGET" &&
+      nextAction.type !== "SKIP_OPTIONAL"
+    ) {
+      (g as unknown as { abandonPendingChoice: () => void }).abandonPendingChoice();
+      continue;
+    }
+    return;
   }
 }
 
@@ -53,7 +72,17 @@ export function gameFromRow(row: DbGame): Game {
     if (g.isOver()) break;
     // Heal older action histories before applying the next saved step.
     // See autoResolveCompatChoices for the motivation.
-    autoResolveCompatChoices(g);
+    autoResolveCompatChoices(g, a);
+    // Inverse compat: if the saved action is a CHOOSE_TARGET but no
+    // pending Choice exists (a later engine fix removed the trigger
+    // that originally surfaced this prompt — e.g. PR #60's covered-flip
+    // middle suppression), skip the now-stale action.
+    if (
+      a.type === "CHOOSE_TARGET" &&
+      (g as unknown as { pending: unknown[] }).pending.length === 0
+    ) {
+      continue;
+    }
     g.step(a);
   }
   return g;
