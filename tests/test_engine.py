@@ -2620,3 +2620,69 @@ def test_unity_0_flip_trigger_does_not_fire_when_flipped_by_non_unity():
     assert not g._pending or g._pending[-1].last_choice is None, (
         "Unity 0's flip_trigger should not fire for non-Unity causes"
     )
+
+
+def test_middle_fires_on_flip_face_up():
+    """Codex (data/rules.txt:411): 'Middle Command - Immediate: Resolve
+    this active text upon card play/flip/uncover.' i.e. flipping a
+    face-down card to face-up must resolve its middle command (not
+    just on play). Regression test driven by user report that opp's
+    Plague 2 didn't seem to fire after being flipped face-up."""
+    from compile_engine import Game, GameConfig
+    from compile_engine.cards import load_card_defs
+    from compile_engine.state import CardInst, Phase
+    from compile_engine.effects import flip_card
+    g = Game(GameConfig(seed=900))
+    g.set_predetermined_draft([["Plague", "Speed", "Fire"], ["Light", "Darkness", "Water"]])
+    g.start()
+    defs = load_card_defs()
+    plague_2 = next(d for d in defs if d.key == "MN01:Plague:2")
+    spirit_0 = next(d for d in defs if d.key == "MN01:Spirit:0")
+    g.state.lines = [type(g.state.lines[0])() for _ in range(3)]
+    # P1 owns a face-down Plague 2 on line 0; both players have 5-card hands
+    # so Plague 2's effect has room to fire (P1 discards ≥1, P0 discards
+    # 1 + 1 = 2 minimum).
+    p2 = CardInst(inst_id=900_01, def_id=plague_2.def_id, owner=1, face_up=False)
+    g.state.lines[0].p1_stack.append(p2)
+    g.state.players[0].hand = [
+        CardInst(inst_id=900_10 + i, def_id=spirit_0.def_id, owner=0, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[1].hand = [
+        CardInst(inst_id=900_20 + i, def_id=spirit_0.def_id, owner=1, face_up=False)
+        for i in range(5)
+    ]
+    g.state.players[0].deck = []
+    g.state.players[1].deck = []
+    g.state.scratch["_engine"] = g
+    g.state.current_player = 0
+    g.state.phase = Phase.ACTION
+
+    # P0 flips P1's face-down Plague 2 face-up (simulating a flip effect
+    # from a card P0 just played). The middle must fire afterwards.
+    flip_card(g.state, 0, 1, 0)
+    assert p2.face_up, "Plague 2 should now be face-up"
+
+    # Drive the engine through the pending Plague 2 middle. Both sides
+    # take greedy discard choices (legal[0]). This must terminate
+    # without leaving a stale pending generator.
+    greedy = GreedyAgent(seed=1)
+    for _ in range(50):
+        g._drive()
+        if g._pending and g._pending[-1].last_choice is not None:
+            legal = g.legal_actions()
+            if not legal:
+                break
+            g.step(greedy.choose(g, legal))
+        else:
+            break
+
+    # P1 (owner) must have discarded ≥1 card; P0 (opp of Plague 2) must
+    # have discarded ≥2. If the middle silently failed to fire, both
+    # hands would still be at 5.
+    assert len(g.state.players[1].hand) <= 4, (
+        f"P1 (Plague 2 owner) should have discarded ≥1 card on flip; hand={len(g.state.players[1].hand)}"
+    )
+    assert len(g.state.players[0].hand) <= 3, (
+        f"P0 (target of Plague 2 flip) should have discarded ≥2 cards; hand={len(g.state.players[0].hand)}"
+    )

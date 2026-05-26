@@ -21,6 +21,7 @@ import { getSession } from "@/lib/auth";
 import { Game } from "@/lib/compile/game";
 import type { Action, PlayerIndex } from "@/lib/compile/types";
 import { db, schema } from "@/lib/db";
+import { autoResolveCompatChoices } from "@/lib/replay";
 import { labelAction, viewOfGame } from "@/lib/view";
 
 export const dynamic = "force-dynamic";
@@ -87,6 +88,9 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   let actor: PlayerIndex | null = null;
   for (let i = 0; i < target; i++) {
     if (game.isOver()) break;
+    // Heal older action histories that don't include the CHOOSE_TARGET
+    // for the new reveal-pause Choice. See lib/replay.ts.
+    autoResolveCompatChoices(game);
     const a = actions[i];
     const last = i === target - 1;
     if (last) {

@@ -17,8 +17,11 @@ import type { Game as DbGame } from "./db/schema";
  *  Psychic 0 / Light 4 / Clarity 1 was played. Auto-resolve those
  *  Choices during replay of older games so they keep loading. New
  *  games will record the CHOOSE_TARGET themselves and won't hit this
- *  branch. */
-function autoResolveCompatChoices(g: Game): void {
+ *  branch.
+ *
+ *  Exported so the snapshot route (which has its own replay loop) and
+ *  any future replayer can reuse it instead of duplicating the logic. */
+export function autoResolveCompatChoices(g: Game): void {
   // `pending` is private on Game; bracket-access matches how
   // view.ts already inspects the pending stack from outside the class.
   while (true) {
