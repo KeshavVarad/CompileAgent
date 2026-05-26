@@ -412,16 +412,32 @@ export class Game {
       st.triggers.push({ kind: "face_up", line: t.line, player: t.player, card: t.card });
       return;
     }
-    const stack = lineStack(st.lines[t.line], t.player);
-    if (!stack.includes(t.card) || !t.card.faceUp) return;
-    if (t.kind === "face_up") { this.enqueueFaceUpTriggers(t.card, t.player, t.line); return; }
+    // Re-locate the card on the owner's side: between when the trigger
+    // was queued (e.g., at flip time) and when it fires (after the
+    // effect chain drains), the card may have been shifted to a
+    // different line in the same effect chain. Darkness 1 is the
+    // canonical case: "Flip 1 of your opponent's cards. You may shift
+    // that card." If the card was shifted post-flip, t.line is stale.
+    // Codex (rules.txt:411): "Middle Command - Immediate: Resolve this
+    // active text upon card play/flip/uncover" — the middle should
+    // fire regardless of the subsequent shift, so we look up the
+    // card's CURRENT line instead of using the original.
+    let curLine = -1;
+    for (let ln = 0; ln < 3; ln++) {
+      if (lineStack(st.lines[ln], t.player).includes(t.card)) {
+        curLine = ln;
+        break;
+      }
+    }
+    if (curLine < 0 || !t.card.faceUp) return;
+    if (t.kind === "face_up") { this.enqueueFaceUpTriggers(t.card, t.player, curLine); return; }
     // uncover: middle only
-    if (middleSuppressed(st, t.line, t.card)) return;
+    if (middleSuppressed(st, curLine, t.card)) return;
     if (t.card.defId === -1) return;
     const d = CARD_DEFS[t.card.defId];
     if (!d.middleText) return;
     const mf = getMiddleEffect(t.card.defId);
-    if (mf) this.pushEffect(mf(st, t.player, t.line, t.card), t.card);
+    if (mf) this.pushEffect(mf(st, t.player, curLine, t.card), t.card);
   }
 
   private *revealPlaceholderEffect(

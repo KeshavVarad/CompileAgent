@@ -914,20 +914,32 @@ class Game:
             self._push_effect(fn(st, pl, ln, card))
             return
         # face_up / uncover require the card still in field and face-up.
-        stack = st.lines[ln].stack(pl)
-        if card not in stack or not card.face_up:
+        # Re-locate the card on the owner's side: the original `ln` may be
+        # stale if the card was shifted to a different line in the same
+        # effect chain that triggered this event. Darkness 1 is the
+        # canonical case ("Flip 1 of your opponent's cards. You may
+        # shift that card.") — without this re-lookup the post-flip
+        # middle silently fails to fire after a shift. Codex
+        # rules.txt:411 — "Resolve this active text upon card
+        # play/flip/uncover" — fires regardless of subsequent shifts.
+        cur_ln = -1
+        for try_ln in range(NUM_LINES):
+            if card in st.lines[try_ln].stack(pl):
+                cur_ln = try_ln
+                break
+        if cur_ln < 0 or not card.face_up:
             return
         if kind == "face_up":
-            self._enqueue_face_up_triggers(card, pl, ln)
+            self._enqueue_face_up_triggers(card, pl, cur_ln)
             return
         # "uncover": fire middle only.
         d = st.defs[card.def_id]
-        if middle_suppressed(st, ln, card):
+        if middle_suppressed(st, cur_ln, card):
             return
         fn = get_middle_effect(d)
         if fn is None or not d.middle_text:
             return
-        self._push_effect(fn(st, pl, ln, card))
+        self._push_effect(fn(st, pl, cur_ln, card))
 
     def _do_clear_cache(self, action: Action) -> None:
         assert action.type is ActionType.DISCARD_CARD
